@@ -208,7 +208,7 @@ Phases 1–3 of the original plan shipped; the CLI/daemon split was reworked to 
 - **Credentials split**. Project configs have no `providers:` block; each source declares its destination inline under the nested `provider:` block. The bot token lives in the relay repo's `.env` as `TELEGRAM_BOT_API_TOKEN`, loaded by `src/credentials.ts` (anchored on `import.meta.url` so launchd's cwd-less invocation still finds it).
 - **Launchd integration** (`src/plist.ts`, `src/commands/lifecycle.ts`). `relay init` writes `~/Library/LaunchAgents/com.fyang0507.relay.plist`, `launchctl bootstrap`s it, and polls `health` until the daemon answers. `relay shutdown` is the reverse.
 - **State schema v2**. New `registry` top-level section; each `sources[filePath]` entry gained a `relayId` linking it back to its registry owner. No auto-migration from v1 — operators clear the file and re-register.
-- **Providers**: stdout (always on) and Telegram (registers when credentials are present). Telegram: `createForumTopic` → `sendMessage` → `getUpdates` long-poll, with 429 `retry_after` handling and permanent-disable classification for "topic gone" 400s.
+- **Providers**: stdout (always on) and Telegram (registers when credentials are present). Telegram: `createForumTopic` → `sendMessage` → `getUpdates` long-poll. `sendMessage` honors a single 429 `retry_after`; `createForumTopic` retries 429/5xx with exponential backoff capped at 5 attempts (GH #9); "topic gone" 400s from `sendMessage` flip the mapping to permanently disabled.
 - **147 tests** across state, watch, dispatch, runtime, config, credentials, telegram, socket, client, daemon, plist, lifecycle, cli.
 
 ### Phase 4 — outreach integration

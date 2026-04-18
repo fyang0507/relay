@@ -303,6 +303,132 @@ describe('TelegramProvider', () => {
     });
   });
 
+  // GH #9: createForumTopic's rate limit trips easily when a fresh `relay add`
+  // matches many existing files at once. Provision now retries 429/5xx with
+  // backoff rather than stranding files until mtime changes.
+  describe('provision retry (#9)', () => {
+    const retryOpts = {
+      provisionMaxAttempts: 3,
+      provisionInitialBackoffMs: 1,
+      provisionMaxBackoffMs: 5,
+    };
+
+    it('retries on 429 and succeeds on the next attempt', async () => {
+      const { fn, calls } = makeFetchStub([
+        () =>
+          jsonResponse({
+            ok: false,
+            error_code: 429,
+            description: 'Too Many Requests: retry after 5',
+            parameters: { retry_after: 0 },
+          }),
+        () => jsonResponse({ ok: true, result: { message_thread_id: 42 } }),
+      ]);
+      globalThis.fetch = fn as typeof fetch;
+
+      const { provider } = makeProvider(retryOpts);
+      const dest = (await provider.provision(
+        { sourceName: 's', filenameStem: 'f', filePath: '/tmp/f.jsonl' },
+        makeSource({ groupId: -100 }),
+      )) as TelegramDestination;
+
+      assert.deepEqual(dest, { groupId: -100, threadId: 42 });
+      assert.equal(calls.length, 2);
+      assert.match(calls[0]!.url, /\/createForumTopic$/);
+      assert.match(calls[1]!.url, /\/createForumTopic$/);
+    });
+
+    it('retries on 5xx with backoff and succeeds once the API recovers', async () => {
+      const { fn, calls } = makeFetchStub([
+        () =>
+          jsonResponse({
+            ok: false,
+            error_code: 500,
+            description: 'Internal Server Error',
+          }),
+        () =>
+          jsonResponse({
+            ok: false,
+            error_code: 503,
+            description: 'Service Unavailable',
+          }),
+        () => jsonResponse({ ok: true, result: { message_thread_id: 7 } }),
+      ]);
+      globalThis.fetch = fn as typeof fetch;
+
+      const { provider } = makeProvider(retryOpts);
+      const dest = (await provider.provision(
+        { sourceName: 's', filenameStem: 'f', filePath: '/tmp/f.jsonl' },
+        makeSource({ groupId: -100 }),
+      )) as TelegramDestination;
+
+      assert.deepEqual(dest, { groupId: -100, threadId: 7 });
+      assert.equal(calls.length, 3);
+    });
+
+    it('throws after exhausting provisionMaxAttempts on sustained 429s', async () => {
+      const { fn, calls } = makeFetchStub([
+        () =>
+          jsonResponse({
+            ok: false,
+            error_code: 429,
+            description: 'retry after 5',
+            parameters: { retry_after: 0 },
+          }),
+        () =>
+          jsonResponse({
+            ok: false,
+            error_code: 429,
+            description: 'retry after 5',
+            parameters: { retry_after: 0 },
+          }),
+        () =>
+          jsonResponse({
+            ok: false,
+            error_code: 429,
+            description: 'retry after 5',
+            parameters: { retry_after: 0 },
+          }),
+      ]);
+      globalThis.fetch = fn as typeof fetch;
+
+      const { provider } = makeProvider(retryOpts);
+      await assert.rejects(
+        () =>
+          provider.provision(
+            { sourceName: 's', filenameStem: 'f', filePath: '/tmp/f.jsonl' },
+            makeSource({ groupId: -100 }),
+          ),
+        /createForumTopic failed: 429/,
+      );
+      // One call per attempt — no silent extra retries.
+      assert.equal(calls.length, retryOpts.provisionMaxAttempts);
+    });
+
+    it('does not retry permanent errors like 400', async () => {
+      const { fn, calls } = makeFetchStub([
+        () =>
+          jsonResponse({
+            ok: false,
+            error_code: 400,
+            description: 'Bad Request: chat not found',
+          }),
+      ]);
+      globalThis.fetch = fn as typeof fetch;
+
+      const { provider } = makeProvider(retryOpts);
+      await assert.rejects(
+        () =>
+          provider.provision(
+            { sourceName: 's', filenameStem: 'f', filePath: '/tmp/f.jsonl' },
+            makeSource({ groupId: -100 }),
+          ),
+        /createForumTopic failed: 400/,
+      );
+      assert.equal(calls.length, 1);
+    });
+  });
+
   describe('receive', () => {
     it('yields forum-topic text messages, skips non-topic and system events, advances cursor', async () => {
       const update1 = {

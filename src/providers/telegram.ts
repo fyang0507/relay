@@ -32,6 +32,14 @@ const LONG_POLL_TIMEOUT_SECONDS = 25;
 // Cap for backoff on transient network/5xx errors in the receive loop.
 const MAX_BACKOFF_MS = 30_000;
 
+// Provision retry policy (see GH #9). Telegram's createForumTopic has a tight
+// rate limit that 429s easily when a fresh `relay add` matches many existing
+// files at once. We honor `retry_after` on 429, exponential-back-off on 5xx,
+// and cap attempts so a genuinely broken backend eventually surfaces.
+const DEFAULT_PROVISION_MAX_ATTEMPTS = 5;
+const DEFAULT_PROVISION_INITIAL_BACKOFF_MS = 5_000;
+const DEFAULT_PROVISION_MAX_BACKOFF_MS = 80_000;
+
 // Concrete shape of a Telegram destination. `groupId` is the numeric chat id
 // (supergroup, negative); `threadId` is the forum `message_thread_id`.
 export interface TelegramDestination extends Record<string, unknown> {
@@ -54,6 +62,12 @@ export interface TelegramProviderOptions {
   botToken: string;
   getUpdateIdCursor: () => number | undefined;
   setUpdateIdCursor: (n: number) => void;
+  // Overrides for the provision retry policy (see GH #9). Defaults cap at 5
+  // attempts with exponential backoff starting at 5s, honoring `retry_after`
+  // when Telegram returns one. Tests set these tiny so the suite stays fast.
+  provisionMaxAttempts?: number;
+  provisionInitialBackoffMs?: number;
+  provisionMaxBackoffMs?: number;
 }
 
 // Substrings that, on a 400 from sendMessage, mean "the topic is gone; don't
@@ -99,9 +113,14 @@ export class TelegramProvider implements Provider {
   private readonly botToken: string;
   private readonly getUpdateIdCursor: () => number | undefined;
   private readonly setUpdateIdCursor: (n: number) => void;
+  private readonly provisionMaxAttempts: number;
+  private readonly provisionInitialBackoffMs: number;
+  private readonly provisionMaxBackoffMs: number;
 
   // Tracks any in-flight fetch so `close()` can cancel it. Reset per call.
   private readonly inflight = new Set<AbortController>();
+  // Fires when close() is called so mid-provision sleeps can abort promptly.
+  private readonly closeAbort = new AbortController();
   // Set once close() is invoked so the receive loop can exit gracefully even
   // if the caller's signal is not aborted (e.g. daemon shutdown).
   private closed = false;
@@ -110,6 +129,12 @@ export class TelegramProvider implements Provider {
     this.botToken = opts.botToken;
     this.getUpdateIdCursor = opts.getUpdateIdCursor;
     this.setUpdateIdCursor = opts.setUpdateIdCursor;
+    this.provisionMaxAttempts =
+      opts.provisionMaxAttempts ?? DEFAULT_PROVISION_MAX_ATTEMPTS;
+    this.provisionInitialBackoffMs =
+      opts.provisionInitialBackoffMs ?? DEFAULT_PROVISION_INITIAL_BACKOFF_MS;
+    this.provisionMaxBackoffMs =
+      opts.provisionMaxBackoffMs ?? DEFAULT_PROVISION_MAX_BACKOFF_MS;
   }
 
   destinationKey(d: Destination): string {
@@ -144,20 +169,57 @@ export class TelegramProvider implements Provider {
     // config mistake rather than a runtime concern. Truncate to Telegram's
     // 128-char hard cap so a long filename can't fail provisioning.
     const topicName = meta.filenameStem.slice(0, TELEGRAM_TOPIC_NAME_LIMIT);
-    const result = await this.callApi<TgForumTopic>('createForumTopic', {
-      chat_id: groupId,
-      name: topicName,
-    });
-    if (!result.ok) {
-      throw new Error(
-        `telegram.provision: createForumTopic failed: ${result.error_code} ${result.description}`,
+    const body = { chat_id: groupId, name: topicName };
+
+    // Retry 429/5xx with backoff (GH #9). `createForumTopic` is aggressively
+    // rate-limited; a burst of pre-existing files on a fresh `relay add` will
+    // otherwise silently strand the ones that trip the limit.
+    let backoffMs = this.provisionInitialBackoffMs;
+    for (let attempt = 1; attempt <= this.provisionMaxAttempts; attempt++) {
+      if (this.closed) {
+        throw new Error(
+          `telegram.provision: aborted during shutdown (source=${meta.sourceName})`,
+        );
+      }
+
+      const result = await this.callApi<TgForumTopic>('createForumTopic', body);
+      if (result.ok) {
+        return {
+          groupId,
+          threadId: result.result.message_thread_id,
+        } satisfies TelegramDestination;
+      }
+
+      const retryable =
+        result.error_code === 429 ||
+        (result.error_code >= 500 && result.error_code < 600);
+      const attemptsLeft = this.provisionMaxAttempts - attempt;
+      if (!retryable || attemptsLeft === 0) {
+        throw new Error(
+          `telegram.provision: createForumTopic failed: ${result.error_code} ${result.description}`,
+        );
+      }
+
+      // Prefer Telegram's `retry_after` hint when present (429s include it);
+      // fall back to exponential backoff otherwise. Always cap at the ceiling.
+      const hintMs =
+        result.parameters?.retry_after !== undefined
+          ? result.parameters.retry_after * 1000
+          : backoffMs;
+      const waitMs = Math.min(hintMs, this.provisionMaxBackoffMs);
+
+      console.warn(
+        `[telegram] createForumTopic attempt ${attempt}/${this.provisionMaxAttempts} failed (${result.error_code} ${result.description}); retrying in ${Math.round(waitMs / 1000)}s for ${meta.filePath}`,
       );
+
+      await sleep(waitMs, this.closeAbort.signal);
+      backoffMs = Math.min(backoffMs * 2, this.provisionMaxBackoffMs);
     }
-    const dest: TelegramDestination = {
-      groupId,
-      threadId: result.result.message_thread_id,
-    };
-    return dest;
+
+    // Unreachable — the loop always returns or throws.
+    throw new Error(
+      `telegram.provision: exhausted ${this.provisionMaxAttempts} attempts (source=${meta.sourceName})`,
+    );
   }
 
   async deliver(
@@ -270,6 +332,7 @@ export class TelegramProvider implements Provider {
 
   async close(): Promise<void> {
     this.closed = true;
+    this.closeAbort.abort();
     for (const ac of this.inflight) {
       try {
         ac.abort();
