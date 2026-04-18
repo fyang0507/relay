@@ -27,6 +27,18 @@ export interface SourceConfig {
   // src/dispatch.ts). Optional at the interface so an unset config stays
   // idiomatic.
   tierKey?: string;
+  // Outbound field allowlist. When set, renderLine projects each parsed entry
+  // to these top-level keys (in this order) before stringifying. Missing keys
+  // are silently absent. The filter is source-wide, so operators whose source
+  // emits multiple line shapes must pick a union that covers all of them.
+  // Nested paths are not supported. See src/render.ts.
+  deliverFields?: string[];
+  // Per-field character cap. Only valid alongside `deliverFields`. Each listed
+  // field's rendered value is individually capped at this many chars (strings
+  // truncated + '...'; non-string values probed via JSON.stringify and
+  // replaced with a truncated stringified form if over). Prevents one large
+  // field from starving the rest. See src/render.ts.
+  deliverFieldMaxChars?: number;
   backfill?: boolean;
 }
 

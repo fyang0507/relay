@@ -18,7 +18,7 @@ File-by-file map (TypeScript, ESM, Node 20+):
 - `src/runtime.ts` — orchestrator with a dynamic source registry. Owns `fileDiscovered` (provision destination, decide offset, stamp `relayId`, track), `truncated` (warn only — V1 halts tail, no auto-recover), lifecycle (`start` replays the persisted registry; `stop` drains inbound and flushes state), `addSource`/`removeSource` (idempotent by `(configPath, sourceName)`), and `listSources`.
 - `src/config.ts` — YAML loader, `${ENV}` expansion, snake_case→camelCase mapping, hand-rolled validator with JSON-path errors. No `providers:` block — each source carries its own `group_id`. Auto-injects `['human_input']` into empty `inbound_types` and emits a warning (echo-loop safeguard).
 - `src/credentials.ts` — loads `.env` from the relay repo root (anchored on `import.meta.url`, NOT `process.cwd()`, so launchd's cwd-less invocation works). Reads `TELEGRAM_BOT_API_TOKEN`.
-- `src/render.ts` — default message renderer: `[<tierKey-value>]\n<pretty JSON>`; soft cap 3500 chars → fall back to single-line JSON → hard-truncate with ellipsis.
+- `src/render.ts` — default message renderer: `[<tierKey-value>]\n<pretty JSON>`; soft cap 3500 chars → fall back to single-line JSON → hard-truncate with ellipsis. Optional per-source `deliverFields` projects top-level keys (ordered by the filter list, missing keys absent); optional `deliverFieldMaxChars` caps each projected field individually (strings truncated + `...`; non-strings probed via `JSON.stringify` and replaced with the truncated stringified form if over).
 - `src/daemon.ts` — daemon entry (`relayd` bin). Composes state + credentials + providers + watcher + dispatcher + runtime + socket server, handles SIGINT/SIGTERM/uncaught.
 - `src/socket.ts` — `SocketServer`. Unix-socket JSON-line RPC at `~/.relay/sock` (mode 0600). One request per connection. Commands: `list`, `add`, `remove`, `health`.
 - `src/client.ts` — `RelayClient` + `DaemonNotRunningError`. Same-shape methods as the socket commands; translates `ENOENT`/`ECONNREFUSED` into `DaemonNotRunningError` and `{ok: false}` responses into `Error` with a `.code` field.
@@ -80,7 +80,7 @@ Why two tsconfigs: `tsconfig.json` is `noEmit: true` and includes both `src` and
 - When `state.disableSource()` fires, dispatch does NOT call `watcher.untrackFile()`, so chokidar keeps tailing silently. Low-harm but wasteful.
 - File rotation / truncation is not handled: `truncated` event halts the tail and `runtime.ts` only logs. State is preserved but the file won't resume without manual intervention. V2: identity via inode + resume.
 - Single-process design: no inter-process file lock on `~/.relay/state.json`.
-- `render.ts` has one default template. Per-type rich templates (markdown, quick-reply keyboards) are V2.
+- `render.ts` has one default template (with optional field allowlist + per-field truncation). Per-type rich templates (markdown, quick-reply keyboards) are still V2.
 - `relay init` hardcodes `process.execPath` into the launchd plist at install time. If the node binary moves (nvm switch, Homebrew upgrade, Volta retarget), re-run `relay init` — the old plist will point at a stale path and the daemon will fail to start.
 - macOS-only: lifecycle commands shell out to `launchctl`. Linux/systemd support is not implemented.
 - No state-file migration: a v1 state file (pre-registry) is rejected loudly; operators must clear `~/.relay/state.json` and re-register sources.
