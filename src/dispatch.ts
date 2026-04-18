@@ -167,10 +167,10 @@ export class RelayDispatcher {
       return;
     }
 
-    const provider = this.providers.get(source.provider);
+    const provider = this.providers.get(source.provider.type);
     if (!provider) {
       console.warn(
-        `[dispatch] no provider "${source.provider}" registered for source "${source.name}"; leaving line for retry`,
+        `[dispatch] no provider "${source.provider.type}" registered for source "${source.name}"; leaving line for retry`,
       );
       return;
     }
@@ -204,7 +204,7 @@ export class RelayDispatcher {
       // have returned earlier), so no extra guard is needed: subsequent
       // appends take the `current.disabled` path and stay silent.
       console.warn(
-        `[dispatch] disabling file mapping for ${ev.filePath} (provider=${source.provider}, reason=${result.reason}); future appends to this file will be skipped until the mapping is re-enabled`,
+        `[dispatch] disabling file mapping for ${ev.filePath} (provider=${source.provider.type}, reason=${result.reason}); future appends to this file will be skipped until the mapping is re-enabled`,
       );
       this.state.disableSource(ev.filePath, result.reason);
       // Do NOT advance offset: once the user reconfigures and we re-enable

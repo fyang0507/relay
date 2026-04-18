@@ -22,15 +22,20 @@
 //
 // Phase 2 split: the config file no longer declares provider credentials or
 // named group references. Bot tokens live in the relay repo's own `.env`
-// (see src/credentials.ts), and each source carries its raw destination
-// `group_id` directly. The top-level `providers:` block has been removed.
+// (see src/credentials.ts), and each source carries its destination directly.
+// The top-level `providers:` block is gone.
+//
+// Phase 3 (issue #6): provider-specific settings (Telegram's `group_id`, etc.)
+// nest under a `provider:` block keyed by `type`. Each provider owns its own
+// sub-schema and sub-validator here, so top-level source fields stay
+// provider-agnostic.
 
 import fsp from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import YAML from 'yaml';
 
-import type { RelayConfig, SourceConfig, Tier } from './types.ts';
+import type { ProviderConfig, RelayConfig, SourceConfig, Tier } from './types.ts';
 
 // Return shape of loadConfig. `warnings` may include the echo-loop auto-inject
 // notice and any other non-fatal diagnostics.
@@ -41,9 +46,12 @@ export interface LoadConfigResult {
 
 const VALID_TIERS: ReadonlyArray<Tier> = ['silent', 'notify', 'ignore'];
 
-// Providers the loader knows have group-id semantics. Other providers
-// (stdout) don't require a `group_id`.
-const PROVIDERS_REQUIRING_GROUP_ID: ReadonlySet<string> = new Set(['telegram']);
+// Every provider the loader knows. Extend when a new provider is wired in:
+// add the type name here and a sub-validator below.
+const KNOWN_PROVIDER_TYPES: ReadonlyArray<ProviderConfig['type']> = [
+  'telegram',
+  'stdout',
+];
 
 function expandHome(p: string): string {
   if (p === '~') return os.homedir();
@@ -128,6 +136,50 @@ function validateTiers(
   return out;
 }
 
+// Per-provider sub-validator. Dispatches on `type`. Each branch validates
+// its own provider-specific keys and returns the camelCase `ProviderConfig`
+// variant. New providers add a new `case`.
+function validateProvider(raw: unknown, pathStr: string): ProviderConfig {
+  const obj = requireObject(raw, pathStr);
+  const type = requireNonEmptyString(obj.type, `${pathStr}.type`);
+  switch (type) {
+    case 'telegram': {
+      if (obj.group_id === undefined) {
+        throw new Error(
+          `Invalid config at ${pathStr}.group_id: required for provider type "telegram"`,
+        );
+      }
+      if (
+        typeof obj.group_id !== 'number' ||
+        !Number.isFinite(obj.group_id)
+      ) {
+        throw new Error(
+          `Invalid config at ${pathStr}.group_id: expected number (chat id)`,
+        );
+      }
+      if (!Number.isInteger(obj.group_id)) {
+        throw new Error(
+          `Invalid config at ${pathStr}.group_id: expected integer, got ${obj.group_id}`,
+        );
+      }
+      if (obj.group_id >= 0) {
+        throw new Error(
+          `Invalid config at ${pathStr}.group_id: Telegram supergroup ids are negative (start with -100...); got ${obj.group_id}`,
+        );
+      }
+      return { type: 'telegram', groupId: obj.group_id };
+    }
+    case 'stdout': {
+      return { type: 'stdout' };
+    }
+    default: {
+      throw new Error(
+        `Invalid config at ${pathStr}.type: unknown provider type "${type}"; known: ${KNOWN_PROVIDER_TYPES.join(', ')}`,
+      );
+    }
+  }
+}
+
 function validateSource(
   raw: unknown,
   pathStr: string,
@@ -136,38 +188,21 @@ function validateSource(
   const obj = requireObject(raw, pathStr);
   const name = requireNonEmptyString(obj.name, `${pathStr}.name`);
   const pathGlob = requireNonEmptyString(obj.path_glob, `${pathStr}.path_glob`);
-  const provider = requireNonEmptyString(obj.provider, `${pathStr}.provider`);
 
-  // `group_id` validation. For providers that require one (telegram), the
-  // value must be a finite integer. Telegram supergroup ids are negative
-  // (start with -100...), so we enforce that too — a positive id is almost
-  // certainly a misconfiguration (e.g. a user id, not a chat id).
-  let groupId: number | undefined;
-  if (obj.group_id !== undefined) {
-    if (typeof obj.group_id !== 'number' || !Number.isFinite(obj.group_id)) {
-      throw new Error(
-        `Invalid config at ${pathStr}.group_id: expected number (chat id)`,
-      );
-    }
-    if (!Number.isInteger(obj.group_id)) {
-      throw new Error(
-        `Invalid config at ${pathStr}.group_id: expected integer, got ${obj.group_id}`,
-      );
-    }
-    groupId = obj.group_id;
+  // Provider block is required. Reject a bare-string `provider:` with an
+  // actionable error — that's the old (pre-#6) shape and is a common
+  // migration pitfall.
+  if (obj.provider === undefined) {
+    throw new Error(
+      `Invalid config at ${pathStr}.provider: required (nested object with at least \`type:\`)`,
+    );
   }
-  if (PROVIDERS_REQUIRING_GROUP_ID.has(provider)) {
-    if (groupId === undefined) {
-      throw new Error(
-        `Invalid config at ${pathStr}.group_id: required for provider "${provider}"`,
-      );
-    }
-    if (provider === 'telegram' && groupId >= 0) {
-      throw new Error(
-        `Invalid config at ${pathStr}.group_id: Telegram supergroup ids are negative (start with -100...); got ${groupId}`,
-      );
-    }
+  if (typeof obj.provider === 'string') {
+    throw new Error(
+      `Invalid config at ${pathStr}.provider: expected nested object { type: <name>, ... }; got a string. The flat \`provider: telegram\` + top-level \`group_id\` shape was replaced in v3; see relay.md §Configuration schema.`,
+    );
   }
+  const provider = validateProvider(obj.provider, `${pathStr}.provider`);
 
   let inboundTypes: string[];
   if (obj.inbound_types === undefined) {
@@ -202,9 +237,6 @@ function validateSource(
     inboundTypes,
     tiers,
   };
-  if (groupId !== undefined) {
-    out.groupId = groupId;
-  }
   // Optional per-source `tier_key`. When absent, consumers default to `"type"`
   // at the call site (see src/dispatch.ts and src/render.ts) — we deliberately
   // do NOT inject a default here so the raw config stays a faithful view of

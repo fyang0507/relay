@@ -3,23 +3,26 @@
 // Per-type delivery policy. See relay.md §Provider contract: the four primitives.
 export type Tier = 'silent' | 'notify' | 'ignore';
 
+// Provider settings for one source. Discriminated by `type`. Each provider
+// owns its own sub-schema so the top-level `SourceConfig` stays provider-
+// agnostic — adding a Slack / Discord / email provider is a new variant
+// here, not another special-case on SourceConfig.
+export type ProviderConfig =
+  | { type: 'telegram'; groupId: number }
+  | { type: 'stdout' };
+
 // One entry of `sources[]` in relay.config.yaml. See relay.md §Configuration schema.
 //
-// Phase 2: credentials (bot tokens) no longer live in the config file — they
-// come from the relay repo's own `.env` via `src/credentials.ts`. The
-// destination chat id is now carried per-source as `groupId` (raw numeric id),
-// replacing the former named-reference indirection through a `providers:`
-// block.
+// Phase 2: credentials (bot tokens) live in the relay repo's own `.env` via
+// `src/credentials.ts`, not in the config file.
+//
+// Phase 3 (issue #6): provider settings are nested under `provider:` so the
+// top-level object carries only provider-agnostic fields. Telegram-specific
+// `group_id` lives on `provider`, not at the source root.
 export interface SourceConfig {
   name: string;
   pathGlob: string;
-  provider: string;
-  // Raw numeric chat id for providers that address destinations by group
-  // (Telegram supergroup ids — negative integers starting with -100).
-  // Optional at the type level so other providers (stdout, iMessage, email)
-  // don't need one, but required at config-load time whenever
-  // `provider === 'telegram'`.
-  groupId?: number;
+  provider: ProviderConfig;
   inboundTypes: string[];
   tiers: Record<string, Tier>;
   // Field name to consult on each JSONL entry for loopback/tier lookups and

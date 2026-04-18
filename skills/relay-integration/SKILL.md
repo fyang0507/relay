@@ -32,7 +32,7 @@ Relay is a passive mirror with a return channel. Outbound: new lines in watched 
 
 3. **Emit compliant JSONL.** Every line must be a JSON object with a join-key field (default name: `type`, value: string). All other fields are passthrough — relay pretty-prints them into the Telegram message body. Append-only, one object per line. Lines missing the join-key field or with malformed JSON are silently skipped. If your existing schema uses a different field name (e.g. `event_type`, `kind`), set `tier_key: your_field` on the source and keep your schema unchanged — relay uses `tier_key` as both the tier-policy lookup and the field name it writes on inbound replies.
 
-4. **Write a `relay.config.yaml`** in your project. One entry in `sources` per logical stream of JSONL files. Point `path_glob` at the directory your agents write to. Declare `group_id` directly (the Telegram supergroup chat id, a negative integer starting with `-100`) and `inbound_types: [human_input]` so relay skips republishing its own inbound writes. The config is credential-free and project-portable — no bot tokens, no `providers:` block. See example below.
+4. **Write a `relay.config.yaml`** in your project. One entry in `sources` per logical stream of JSONL files. Point `path_glob` at the directory your agents write to. Under `provider:`, set `type: telegram` and `group_id` (the Telegram supergroup chat id, a negative integer starting with `-100`). Set `inbound_types: [human_input]` so relay skips republishing its own inbound writes. The config is credential-free and project-portable — no bot tokens, no top-level `providers:` block. See example below.
 
 5. **Install relay once on your machine, then register your project.** In the relay checkout: `npm install && npm run build`, add `TELEGRAM_BOT_API_TOKEN=...` to the relay repo's `.env`, run `relay init` (installs the launchd agent under `com.fyang0507.relay` and starts the daemon). Then, from anywhere, register your project's config with `relay add --config /abs/path/to/your/relay.config.yaml` and verify with `relay list`. Re-run `relay add` after edits to register new sources; existing ones are idempotent by `(configPath, sourceName)`.
 
@@ -51,8 +51,6 @@ Relay is a passive mirror with a return channel. Outbound: new lines in watched 
 sources:
   - name: outreach-campaigns
     path_glob: ~/outreach-data/outreach/campaigns/*.jsonl
-    provider: telegram
-    group_id: -1001234567890
     # tier_key: type   # override if your agents already use a different field name
     inbound_types: [human_input]
     tiers:
@@ -61,6 +59,9 @@ sources:
       email.sent: silent
       human_question: notify
       # unlisted types default to silent
+    provider:
+      type: telegram
+      group_id: -1001234567890
 ```
 
 Each new JSONL file matching `path_glob` provisions a Telegram forum topic named after the file stem; subsequent lines append as messages in that topic.

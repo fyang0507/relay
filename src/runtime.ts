@@ -44,6 +44,9 @@ export interface RelayConstructorOpts {
 // Flat projection of a live registered source for CLI consumption (P4).
 // Phase 2: the old `group` (named reference) is gone; we expose `groupId`
 // directly when the source has one (telegram sources always will).
+// Phase 3 (#6): `provider` is now the provider type (`"telegram"`, etc.);
+// `groupId` is pulled out of the nested `provider.groupId` for Telegram so
+// the wire shape the CLI renders stays flat and unchanged from v2.
 export interface ListedSource {
   id: string;
   configPath: string;
@@ -237,13 +240,13 @@ export class Relay {
         id: entry.id,
         configPath: entry.configPath,
         sourceName: entry.sourceConfig.name,
-        provider: entry.sourceConfig.provider,
+        provider: entry.sourceConfig.provider.type,
         filesTracked,
         filesDisabled,
         disabled,
       };
-      if (entry.sourceConfig.groupId !== undefined) {
-        listed.groupId = entry.sourceConfig.groupId;
+      if (entry.sourceConfig.provider.type === 'telegram') {
+        listed.groupId = entry.sourceConfig.provider.groupId;
       }
       out.push(listed);
     }
@@ -288,21 +291,10 @@ export class Relay {
     }
 
     // Fresh file — provision a destination.
-    const provider = this.providers.get(source.provider);
+    const provider = this.providers.get(source.provider.type);
     if (!provider) {
       console.warn(
-        `[runtime] no provider "${source.provider}" registered for source "${sourceName}"; cannot provision ${filePath}`,
-      );
-      return;
-    }
-
-    // Phase 2 guard: telegram sources must carry a numeric `groupId`. We
-    // check here (in addition to the config loader) so runtime callers that
-    // bypass `loadConfig` — e.g. tests that hand-craft a SourceConfig — still
-    // get a loud, localized failure rather than a cryptic Telegram API error.
-    if (source.provider === 'telegram' && source.groupId === undefined) {
-      console.warn(
-        `[runtime] telegram source "${sourceName}" missing group_id; cannot provision ${filePath}`,
+        `[runtime] no provider "${source.provider.type}" registered for source "${sourceName}"; cannot provision ${filePath}`,
       );
       return;
     }

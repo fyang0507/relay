@@ -55,7 +55,11 @@ function makeSource(overrides: Partial<SourceConfig> = {}): SourceConfig {
   return {
     name: 'test-src',
     pathGlob: '/unused/*.jsonl',
-    provider: 'stub',
+    // The stub provider registers under the 'stdout' map key in these tests
+    // (only the discriminant matters for dispatch lookup). The stub's own
+    // `.name = 'stub'` stays distinct so log messages don't pretend to be
+    // the real StdoutProvider.
+    provider: { type: 'stdout' },
     inboundTypes: ['human_input'],
     tiers: { 'call.placed': 'silent', 'call.outcome': 'notify', noisy: 'ignore' },
     ...overrides,
@@ -269,7 +273,7 @@ describe('RelayDispatcher outbound', () => {
     const dispatcher = new RelayDispatcher({
       resolveSource: resolver([source]),
       state,
-      providers: new Map([['stub', provider]]),
+      providers: new Map([['stdout', provider]]),
       watcher,
     });
     dispatcher.start();
@@ -309,7 +313,7 @@ describe('RelayDispatcher outbound', () => {
     const dispatcher = new RelayDispatcher({
       resolveSource: resolver([source]),
       state,
-      providers: new Map([['stub', provider]]),
+      providers: new Map([['stdout', provider]]),
       watcher,
     });
     dispatcher.start();
@@ -340,7 +344,7 @@ describe('RelayDispatcher outbound', () => {
     const d = new RelayDispatcher({
       resolveSource: resolver([source]),
       state,
-      providers: new Map([['stub', provider]]),
+      providers: new Map([['stdout', provider]]),
       watcher,
     });
     d.start();
@@ -374,7 +378,7 @@ describe('RelayDispatcher outbound', () => {
     const d = new RelayDispatcher({
       resolveSource: resolver([source]),
       state,
-      providers: new Map([['stub', provider]]),
+      providers: new Map([['stdout', provider]]),
       watcher,
     });
     d.start();
@@ -413,7 +417,7 @@ describe('RelayDispatcher outbound', () => {
     const d = new RelayDispatcher({
       resolveSource: resolver([source]),
       state,
-      providers: new Map([['stub', provider]]),
+      providers: new Map([['stdout', provider]]),
       watcher,
     });
     d.start();
@@ -450,7 +454,7 @@ describe('RelayDispatcher outbound', () => {
     const d = new RelayDispatcher({
       resolveSource: resolver([source]),
       state,
-      providers: new Map([['stub', provider]]),
+      providers: new Map([['stdout', provider]]),
       watcher,
     });
     d.start();
@@ -469,7 +473,7 @@ describe('RelayDispatcher outbound', () => {
       assert.equal(warnCalls.length, 1, 'exactly one warn expected on disable transition');
       const msg = warnCalls[0];
       assert.ok(msg.includes(filePath), `warn message should include file path: ${msg}`);
-      assert.ok(msg.includes(source.provider), `warn message should include provider name: ${msg}`);
+      assert.ok(msg.includes(source.provider.type), `warn message should include provider name: ${msg}`);
       assert.ok(msg.includes('topic not found'), `warn message should include reason: ${msg}`);
 
       // Second append to the same (now-disabled) file: no additional warn.
@@ -512,7 +516,7 @@ describe('RelayDispatcher outbound', () => {
     const d = new RelayDispatcher({
       resolveSource: resolver([source]),
       state,
-      providers: new Map([['stub', provider]]),
+      providers: new Map([['stdout', provider]]),
       watcher,
     });
     d.start();
@@ -543,7 +547,7 @@ describe('RelayDispatcher outbound', () => {
     const d = new RelayDispatcher({
       resolveSource: resolver([source]),
       state,
-      providers: new Map([['stub', provider]]),
+      providers: new Map([['stdout', provider]]),
       watcher,
     });
     d.start();
@@ -575,7 +579,7 @@ describe('RelayDispatcher outbound', () => {
     const d = new RelayDispatcher({
       resolveSource: resolver([source]),
       state,
-      providers: new Map([['stub', provider]]),
+      providers: new Map([['stdout', provider]]),
       watcher,
     });
     d.start();
@@ -611,7 +615,7 @@ describe('RelayDispatcher outbound', () => {
     const d = new RelayDispatcher({
       resolveSource: (n) => live.find((s) => s.name === n),
       state,
-      providers: new Map([['stub', provider]]),
+      providers: new Map([['stdout', provider]]),
       watcher,
     });
     d.start();
@@ -644,7 +648,7 @@ describe('RelayDispatcher outbound', () => {
     const d = new RelayDispatcher({
       resolveSource: resolver([source]),
       state,
-      providers: new Map([['stub', provider]]),
+      providers: new Map([['stdout', provider]]),
       watcher,
     });
     d.start();
@@ -676,7 +680,7 @@ describe('RelayDispatcher outbound', () => {
     const d = new RelayDispatcher({
       resolveSource: resolver([source]),
       state,
-      providers: new Map([['stub', provider]]),
+      providers: new Map([['stdout', provider]]),
       watcher,
     });
     d.start();
@@ -748,7 +752,7 @@ describe('RelayDispatcher outbound', () => {
     const d = new RelayDispatcher({
       resolveSource: resolver([source]),
       state,
-      providers: new Map([['stub', provider]]),
+      providers: new Map([['stdout', provider]]),
       watcher,
     });
     d.start();
@@ -791,7 +795,7 @@ describe('RelayDispatcher inbound', () => {
     const d = new RelayDispatcher({
       resolveSource: resolver([source]),
       state,
-      providers: new Map([['stub', provider]]),
+      providers: new Map([['stdout', provider]]),
       watcher,
     });
     d.start();
@@ -839,7 +843,7 @@ describe('RelayDispatcher inbound', () => {
     const d = new RelayDispatcher({
       resolveSource: resolver([source]),
       state,
-      providers: new Map([['stub', provider]]),
+      providers: new Map([['stdout', provider]]),
       watcher,
     });
     d.start();
@@ -879,7 +883,7 @@ describe('RelayDispatcher inbound', () => {
     const d = new RelayDispatcher({
       resolveSource: resolver([source]),
       state,
-      providers: new Map([['stub', provider]]),
+      providers: new Map([['stdout', provider]]),
       watcher,
     });
     d.start();
@@ -927,7 +931,7 @@ describe('RelayDispatcher inbound', () => {
     const d = new RelayDispatcher({
       resolveSource: resolver([source]),
       state,
-      providers: new Map([['stub', provider]]),
+      providers: new Map([['stdout', provider]]),
       watcher,
     });
     d.start();

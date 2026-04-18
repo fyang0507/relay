@@ -59,13 +59,13 @@ class FakeRelay {
         id: e.id,
         configPath: e.configPath,
         sourceName: e.sourceConfig.name,
-        provider: e.sourceConfig.provider,
+        provider: e.sourceConfig.provider.type,
         filesTracked,
         filesDisabled,
         disabled: filesTracked > 0 && filesDisabled === filesTracked,
       };
-      if (e.sourceConfig.groupId !== undefined) {
-        out.groupId = e.sourceConfig.groupId;
+      if (e.sourceConfig.provider.type === 'telegram') {
+        out.groupId = e.sourceConfig.provider.groupId;
       }
       return out;
     });
@@ -189,7 +189,7 @@ test('list returns empty sources by default, then reflects registry', async (t) 
     {
       name: 'planted',
       pathGlob: '/tmp/x/*.jsonl',
-      provider: 'stdout',
+      provider: { type: 'stdout' },
       inboundTypes: ['human_input'],
       tiers: {},
     },
@@ -212,7 +212,7 @@ test('list surfaces filesDisabled count from per-file state', async (t) => {
     {
       name: 'mixed',
       pathGlob: '/tmp/mixed/*.jsonl',
-      provider: 'stdout',
+      provider: { type: 'stdout' },
       inboundTypes: ['human_input'],
       tiers: {},
     },
@@ -264,7 +264,8 @@ test('add happy path registers sources and returns warnings', async (t) => {
     `sources:
   - name: demo
     path_glob: ${h.tmpDir}/*.jsonl
-    provider: stdout
+    provider:
+      type: stdout
 `,
   );
   const resp = await rpc<{
@@ -302,8 +303,9 @@ test('add dryRun does not register and returns wouldAdd', async (t) => {
     `sources:
   - name: dry
     path_glob: ${h.tmpDir}/*.jsonl
-    provider: stdout
     inbound_types: [human_input]
+    provider:
+      type: stdout
 `,
   );
   const resp = await rpc<{
@@ -372,7 +374,7 @@ test('remove happy path + dryRun + not_found', async (t) => {
     {
       name: 'to-remove',
       pathGlob: '/tmp/x/*.jsonl',
-      provider: 'stdout',
+      provider: { type: 'stdout' },
       inboundTypes: ['human_input'],
       tiers: {},
     },

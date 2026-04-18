@@ -1,8 +1,11 @@
 // Tests for src/config.ts. Uses node:test.
 //
 // Phase 2: the YAML config declares only sources. Bot tokens live in the
-// relay repo's own `.env` (see src/credentials.ts), and each source carries
-// its destination `group_id` (raw numeric chat id) directly.
+// relay repo's own `.env` (see src/credentials.ts).
+//
+// Phase 3 (#6): provider-specific settings (Telegram `group_id`, etc.)
+// nest under a `provider:` block keyed by `type`. The top-level object
+// stays provider-agnostic.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -26,12 +29,13 @@ test('loads a well-formed minimal config and camelCases keys', async () => {
 sources:
   - name: outreach-campaigns
     path_glob: /tmp/relay-test-campaigns/*.jsonl
-    provider: telegram
-    group_id: -1003975893613
     inbound_types: [human_input]
     tiers:
       call.placed: silent
       call.outcome: notify
+    provider:
+      type: telegram
+      group_id: -1003975893613
 `,
   );
 
@@ -42,8 +46,10 @@ sources:
   const src = config.sources[0];
   assert.equal(src.name, 'outreach-campaigns');
   assert.equal(src.pathGlob, '/tmp/relay-test-campaigns/*.jsonl');
-  assert.equal(src.provider, 'telegram');
-  assert.equal(src.groupId, -1003975893613);
+  assert.deepEqual(src.provider, {
+    type: 'telegram',
+    groupId: -1003975893613,
+  });
   assert.deepEqual(src.inboundTypes, ['human_input']);
   assert.deepEqual(src.tiers, {
     'call.placed': 'silent',
@@ -61,9 +67,10 @@ test('missing env var throws with variable name in message', async () => {
 sources:
   - name: s
     path_glob: /tmp/\${RELAY_TEST_MISSING_VAR}/*.jsonl
-    provider: telegram
-    group_id: -1
     inbound_types: [human_input]
+    provider:
+      type: telegram
+      group_id: -1
 `,
   );
   await assert.rejects(
@@ -79,25 +86,28 @@ test('invalid tier value throws with JSON path', async () => {
 sources:
   - name: a
     path_glob: /tmp/a/*.jsonl
-    provider: telegram
-    group_id: -1
     inbound_types: [human_input]
     tiers:
       call.placed: silent
+    provider:
+      type: telegram
+      group_id: -1
   - name: b
     path_glob: /tmp/b/*.jsonl
-    provider: telegram
-    group_id: -1
     inbound_types: [human_input]
     tiers:
       call.placed: silent
+    provider:
+      type: telegram
+      group_id: -1
   - name: c
     path_glob: /tmp/c/*.jsonl
-    provider: telegram
-    group_id: -1
     inbound_types: [human_input]
     tiers:
       call.outcome: bogus
+    provider:
+      type: telegram
+      group_id: -1
 `,
   );
   await assert.rejects(
@@ -113,10 +123,11 @@ test('empty inbound_types auto-injects [human_input] and emits warning', async (
 sources:
   - name: s
     path_glob: /tmp/*.jsonl
-    provider: telegram
-    group_id: -1
     inbound_types: []
     tiers: {}
+    provider:
+      type: telegram
+      group_id: -1
 `,
   );
   const { config, warnings } = await loadConfig(fp);
@@ -126,20 +137,21 @@ sources:
   assert.match(warnings[0], /human_input/);
 });
 
-test('telegram source without group_id throws with JSON path', async () => {
+test('telegram provider without group_id throws with JSON path', async () => {
   const fp = await mkTmpConfig(
     'no-group-id',
     `
 sources:
   - name: s
     path_glob: /tmp/*.jsonl
-    provider: telegram
     inbound_types: [human_input]
+    provider:
+      type: telegram
 `,
   );
   await assert.rejects(
     () => loadConfig(fp),
-    /sources\[0\]\.group_id/,
+    /sources\[0\]\.provider\.group_id/,
   );
 });
 
@@ -150,13 +162,17 @@ test('group_id accepts negative integers (real Telegram supergroup id)', async (
 sources:
   - name: s
     path_glob: /tmp/*.jsonl
-    provider: telegram
-    group_id: -1003975893613
     inbound_types: [human_input]
+    provider:
+      type: telegram
+      group_id: -1003975893613
 `,
   );
   const { config } = await loadConfig(fp);
-  assert.equal(config.sources[0].groupId, -1003975893613);
+  assert.deepEqual(config.sources[0].provider, {
+    type: 'telegram',
+    groupId: -1003975893613,
+  });
 });
 
 test('group_id rejects non-number with JSON path', async () => {
@@ -166,14 +182,15 @@ test('group_id rejects non-number with JSON path', async () => {
 sources:
   - name: s
     path_glob: /tmp/*.jsonl
-    provider: telegram
-    group_id: "not-a-number"
     inbound_types: [human_input]
+    provider:
+      type: telegram
+      group_id: "not-a-number"
 `,
   );
   await assert.rejects(
     () => loadConfig(fp),
-    /sources\[0\]\.group_id/,
+    /sources\[0\]\.provider\.group_id/,
   );
 });
 
@@ -184,14 +201,15 @@ test('group_id rejects non-integer (float) with JSON path', async () => {
 sources:
   - name: s
     path_glob: /tmp/*.jsonl
-    provider: telegram
-    group_id: -100.5
     inbound_types: [human_input]
+    provider:
+      type: telegram
+      group_id: -100.5
 `,
   );
   await assert.rejects(
     () => loadConfig(fp),
-    /sources\[0\]\.group_id/,
+    /sources\[0\]\.provider\.group_id/,
   );
 });
 
@@ -202,14 +220,15 @@ test('group_id rejects positive id for telegram (must be negative)', async () =>
 sources:
   - name: s
     path_glob: /tmp/*.jsonl
-    provider: telegram
-    group_id: 12345
     inbound_types: [human_input]
+    provider:
+      type: telegram
+      group_id: 12345
 `,
   );
   await assert.rejects(
     () => loadConfig(fp),
-    /sources\[0\]\.group_id.*negative/,
+    /sources\[0\]\.provider\.group_id.*negative/,
   );
 });
 
@@ -220,14 +239,16 @@ test('duplicate source names throw', async () => {
 sources:
   - name: same
     path_glob: /tmp/a/*.jsonl
-    provider: telegram
-    group_id: -1
     inbound_types: [human_input]
+    provider:
+      type: telegram
+      group_id: -1
   - name: same
     path_glob: /tmp/b/*.jsonl
-    provider: telegram
-    group_id: -1
     inbound_types: [human_input]
+    provider:
+      type: telegram
+      group_id: -1
 `,
   );
   await assert.rejects(
@@ -243,10 +264,11 @@ test('tier_key present: parsed to camelCase tierKey', async () => {
 sources:
   - name: s
     path_glob: /tmp/*.jsonl
-    provider: telegram
-    group_id: -1
     tier_key: event_type
     inbound_types: [human_input]
+    provider:
+      type: telegram
+      group_id: -1
 `,
   );
   const { config } = await loadConfig(fp);
@@ -260,9 +282,10 @@ test('tier_key absent: tierKey is undefined (consumer defaults to "type")', asyn
 sources:
   - name: s
     path_glob: /tmp/*.jsonl
-    provider: telegram
-    group_id: -1
     inbound_types: [human_input]
+    provider:
+      type: telegram
+      group_id: -1
 `,
   );
   const { config } = await loadConfig(fp);
@@ -276,10 +299,11 @@ test('tier_key must be a string when present', async () => {
 sources:
   - name: s
     path_glob: /tmp/*.jsonl
-    provider: telegram
-    group_id: -1
     tier_key: 42
     inbound_types: [human_input]
+    provider:
+      type: telegram
+      group_id: -1
 `,
   );
   await assert.rejects(
@@ -295,9 +319,10 @@ test('tiers default to empty object when omitted', async () => {
 sources:
   - name: s
     path_glob: /tmp/*.jsonl
-    provider: telegram
-    group_id: -1
     inbound_types: [human_input]
+    provider:
+      type: telegram
+      group_id: -1
 `,
   );
   const { config } = await loadConfig(fp);
@@ -305,20 +330,74 @@ sources:
 });
 
 test('stdout provider does not require group_id', async () => {
-  // Non-telegram providers pass through without a group_id requirement.
+  // The stdout provider sub-schema takes nothing beyond `type`.
   const fp = await mkTmpConfig(
     'stdout-no-group',
     `
 sources:
   - name: s
     path_glob: /tmp/*.jsonl
-    provider: stdout
     inbound_types: [human_input]
+    provider:
+      type: stdout
 `,
   );
   const { config } = await loadConfig(fp);
-  assert.equal(config.sources[0].provider, 'stdout');
-  assert.equal(config.sources[0].groupId, undefined);
+  assert.deepEqual(config.sources[0].provider, { type: 'stdout' });
+});
+
+test('unknown provider type throws with the list of known types', async () => {
+  const fp = await mkTmpConfig(
+    'unknown-provider',
+    `
+sources:
+  - name: s
+    path_glob: /tmp/*.jsonl
+    inbound_types: [human_input]
+    provider:
+      type: carrier-pigeon
+`,
+  );
+  await assert.rejects(
+    () => loadConfig(fp),
+    /sources\[0\]\.provider\.type.*unknown provider type "carrier-pigeon"/,
+  );
+});
+
+test('missing provider block throws with actionable message', async () => {
+  const fp = await mkTmpConfig(
+    'no-provider',
+    `
+sources:
+  - name: s
+    path_glob: /tmp/*.jsonl
+    inbound_types: [human_input]
+`,
+  );
+  await assert.rejects(
+    () => loadConfig(fp),
+    /sources\[0\]\.provider.*required/,
+  );
+});
+
+test('old flat `provider: telegram` + top-level `group_id` shape: rejected with migration hint', async () => {
+  // Schema bump in v3 (#6): the old flat form must fail loudly rather than
+  // silently misbehave. The error should point the reader at relay.md.
+  const fp = await mkTmpConfig(
+    'legacy-flat-provider',
+    `
+sources:
+  - name: s
+    path_glob: /tmp/*.jsonl
+    provider: telegram
+    group_id: -1001
+    inbound_types: [human_input]
+`,
+  );
+  await assert.rejects(
+    () => loadConfig(fp),
+    /sources\[0\]\.provider.*expected nested object.*v3.*Configuration schema/s,
+  );
 });
 
 test('accepts deliver_fields + deliver_field_max_chars and camelCases', async () => {
@@ -328,9 +407,10 @@ test('accepts deliver_fields + deliver_field_max_chars and camelCases', async ()
 sources:
   - name: s
     path_glob: /tmp/*.jsonl
-    provider: telegram
-    group_id: -1
     inbound_types: [human_input]
+    provider:
+      type: telegram
+      group_id: -1
     deliver_fields: [tool, args, notes]
     deliver_field_max_chars: 500
 `,
@@ -347,9 +427,10 @@ test('omitting deliver_fields leaves both fields unset', async () => {
 sources:
   - name: s
     path_glob: /tmp/*.jsonl
-    provider: telegram
-    group_id: -1
     inbound_types: [human_input]
+    provider:
+      type: telegram
+      group_id: -1
 `,
   );
   const { config } = await loadConfig(fp);
@@ -364,9 +445,10 @@ test('deliver_fields: rejects empty array', async () => {
 sources:
   - name: s
     path_glob: /tmp/*.jsonl
-    provider: telegram
-    group_id: -1
     inbound_types: [human_input]
+    provider:
+      type: telegram
+      group_id: -1
     deliver_fields: []
 `,
   );
@@ -383,9 +465,10 @@ test('deliver_fields: rejects non-array', async () => {
 sources:
   - name: s
     path_glob: /tmp/*.jsonl
-    provider: telegram
-    group_id: -1
     inbound_types: [human_input]
+    provider:
+      type: telegram
+      group_id: -1
     deliver_fields: "tool"
 `,
   );
@@ -402,9 +485,10 @@ test('deliver_fields: rejects empty-string entry', async () => {
 sources:
   - name: s
     path_glob: /tmp/*.jsonl
-    provider: telegram
-    group_id: -1
     inbound_types: [human_input]
+    provider:
+      type: telegram
+      group_id: -1
     deliver_fields: [tool, ""]
 `,
   );
@@ -421,9 +505,10 @@ test('deliver_fields: rejects duplicates', async () => {
 sources:
   - name: s
     path_glob: /tmp/*.jsonl
-    provider: telegram
-    group_id: -1
     inbound_types: [human_input]
+    provider:
+      type: telegram
+      group_id: -1
     deliver_fields: [tool, args, tool]
 `,
   );
@@ -440,9 +525,10 @@ test('deliver_field_max_chars: rejected when deliver_fields is not set', async (
 sources:
   - name: s
     path_glob: /tmp/*.jsonl
-    provider: telegram
-    group_id: -1
     inbound_types: [human_input]
+    provider:
+      type: telegram
+      group_id: -1
     deliver_field_max_chars: 500
 `,
   );
@@ -459,9 +545,10 @@ test('deliver_field_max_chars: rejects non-integer', async () => {
 sources:
   - name: s
     path_glob: /tmp/*.jsonl
-    provider: telegram
-    group_id: -1
     inbound_types: [human_input]
+    provider:
+      type: telegram
+      group_id: -1
     deliver_fields: [tool]
     deliver_field_max_chars: 12.5
 `,
@@ -479,9 +566,10 @@ test('deliver_field_max_chars: rejects out-of-range (too low)', async () => {
 sources:
   - name: s
     path_glob: /tmp/*.jsonl
-    provider: telegram
-    group_id: -1
     inbound_types: [human_input]
+    provider:
+      type: telegram
+      group_id: -1
     deliver_fields: [tool]
     deliver_field_max_chars: 10
 `,
@@ -499,9 +587,10 @@ test('deliver_field_max_chars: rejects out-of-range (too high)', async () => {
 sources:
   - name: s
     path_glob: /tmp/*.jsonl
-    provider: telegram
-    group_id: -1
     inbound_types: [human_input]
+    provider:
+      type: telegram
+      group_id: -1
     deliver_fields: [tool]
     deliver_field_max_chars: 5000
 `,

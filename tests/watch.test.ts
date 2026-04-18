@@ -27,7 +27,8 @@ function makeSource(dir: string, name = 'test-src'): SourceConfig {
   return {
     name,
     pathGlob: path.join(dir, '*.jsonl'),
-    provider: 'dryrun',
+    // Watcher doesn't use the provider field at all — any valid variant works.
+    provider: { type: 'stdout' },
     inboundTypes: [],
     tiers: {},
   };

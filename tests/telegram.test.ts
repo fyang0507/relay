@@ -11,16 +11,25 @@ import type {
 } from '../src/providers/telegram.ts';
 import type { SourceConfig } from '../src/types.ts';
 
-function makeSource(overrides: Partial<SourceConfig> = {}): SourceConfig {
-  return {
-    name: 'outreach-campaigns',
+// Convenience overrides: per-source tweaks are overwhelmingly `name` and
+// `groupId` in these tests, so accept them flat and assemble the nested
+// `provider:` block here. Pass a raw `SourceConfig` shape via `...config`
+// to fully override (e.g. to swap to a non-telegram provider).
+interface MakeSourceOverrides {
+  name?: string;
+  groupId?: number;
+  config?: Partial<SourceConfig>;
+}
+
+function makeSource(overrides: MakeSourceOverrides = {}): SourceConfig {
+  const base: SourceConfig = {
+    name: overrides.name ?? 'outreach-campaigns',
     pathGlob: '/tmp/*.jsonl',
-    provider: 'telegram',
-    groupId: -100123,
+    provider: { type: 'telegram', groupId: overrides.groupId ?? -100123 },
     inboundTypes: ['human_input'],
     tiers: {},
-    ...overrides,
   };
+  return { ...base, ...(overrides.config ?? {}) };
 }
 
 type FetchArgs = { url: string; init: RequestInit; body: unknown };
@@ -254,7 +263,10 @@ describe('TelegramProvider', () => {
       assert.equal(name, 'a'.repeat(128));
     });
 
-    it('throws when sourceConfig.groupId is missing', async () => {
+    it('throws when handed a non-telegram provider config (discriminant mismatch)', async () => {
+      // #6: provision narrows on `provider.type`. Handing it a stdout-provider
+      // source config should throw loudly rather than attempt to read
+      // `groupId` off a variant that doesn't have one.
       const { provider } = makeProvider();
       await assert.rejects(
         () =>
@@ -264,9 +276,9 @@ describe('TelegramProvider', () => {
               filenameStem: 'f',
               filePath: '/tmp/f.jsonl',
             },
-            makeSource({ groupId: undefined }),
+            makeSource({ config: { provider: { type: 'stdout' } } }),
           ),
-        /sourceConfig\.groupId is required/,
+        /expected provider\.type "telegram", got "stdout"/,
       );
     });
 
