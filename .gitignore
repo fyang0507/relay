@@ -1,0 +1,5 @@
+node_modules
+dist
+.env
+relay.config.yaml
+.DS_Store
