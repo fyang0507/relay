@@ -1,10 +1,15 @@
-// Startup orchestrator. Wires config → state → providers → watcher → dispatcher
-// and owns file-discovery/provisioning. See relay.md §Startup and backfill
-// behavior and §Viewer-side reconciliation.
+// Long-running orchestrator with a dynamic source registry. See relay.md
+// §Architecture and §Startup and backfill behavior.
+//
+// Phase 1a: the runtime no longer takes a static `config` at construction;
+// the CLI/socket layer (P1b+P4) hands sources in at runtime via addSource()
+// and yanks them via removeSource(). On start(), the runtime replays the
+// persisted registry so the set of live sources survives restarts.
 //
 // Responsibility split vs. dispatch:
 //   - Runtime owns 'fileDiscovered' (resolve source, provision destination,
-//     decide starting offset, call state.setSource, call watcher.trackFile).
+//     decide starting offset, call state.setSource with a relayId, call
+//     watcher.trackFile).
 //   - Runtime owns 'truncated' (log a warning; V1 halts tailing — watcher has
 //     already done this. We deliberately do NOT reset state; a human must
 //     decide whether to re-enable the source.)
@@ -16,8 +21,8 @@
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 
-import type { RelayConfig, SourceConfig } from './types.ts';
-import type { RelayState } from './state.ts';
+import type { SourceConfig } from './types.ts';
+import type { RelayState, RegistryEntry } from './state.ts';
 import type { RelayWatcher } from './watch.ts';
 import type { RelayDispatcher } from './dispatch.ts';
 import type { Provider } from './providers/types.ts';
@@ -29,7 +34,6 @@ export interface RelayOptions {
 }
 
 export interface RelayConstructorOpts {
-  config: RelayConfig;
   state: RelayState;
   providers: Map<string, Provider>;
   watcher: RelayWatcher;
@@ -37,15 +41,25 @@ export interface RelayConstructorOpts {
   options?: RelayOptions;
 }
 
+// Flat projection of a live registered source for CLI consumption (P4).
+// Phase 2: the old `group` (named reference) is gone; we expose `groupId`
+// directly when the source has one (telegram sources always will).
+export interface ListedSource {
+  id: string;
+  configPath: string;
+  sourceName: string;
+  provider: string;
+  groupId?: number;
+  filesTracked: number;
+  disabled: boolean;
+}
+
 export class Relay {
-  private readonly config: RelayConfig;
   private readonly state: RelayState;
   private readonly providers: Map<string, Provider>;
   private readonly watcher: RelayWatcher;
   private readonly dispatcher: RelayDispatcher;
   private readonly options: RelayOptions;
-
-  private readonly sourcesByName: Map<string, SourceConfig>;
 
   // Bound handlers so start() and stop() attach/detach the same references.
   private readonly onFileDiscovered: (filePath: string, sourceName: string) => void;
@@ -55,13 +69,11 @@ export class Relay {
   private stopped = false;
 
   constructor(opts: RelayConstructorOpts) {
-    this.config = opts.config;
     this.state = opts.state;
     this.providers = opts.providers;
     this.watcher = opts.watcher;
     this.dispatcher = opts.dispatcher;
     this.options = opts.options ?? {};
-    this.sourcesByName = new Map(this.config.sources.map((s) => [s.name, s]));
 
     this.onFileDiscovered = (filePath, sourceName) => {
       // Fire-and-forget: the watcher emits synchronously but provisioning may
@@ -85,18 +97,31 @@ export class Relay {
     if (this.started) return;
     this.started = true;
 
-    // Attach handlers BEFORE starting watcher so pre-existing files get
-    // provisioned on the initial scan.
+    // Attach handlers BEFORE wiring any source into the watcher so
+    // pre-existing files get provisioned on the initial scan.
     this.watcher.on('fileDiscovered', this.onFileDiscovered);
     this.watcher.on('truncated', this.onTruncated);
 
     // Start the dispatcher first so inbound loops are live and the 'line'
-    // handler is attached before the watcher starts emitting.
-    await this.dispatcher.start();
+    // handler is attached before any source emits.
+    this.dispatcher.start();
 
-    // Now start the watcher. It will emit 'fileDiscovered' for every
-    // pre-existing matching file and subsequently for new ones.
+    // Base watcher lifecycle (no-op today, but preserve the hook).
     await this.watcher.start();
+
+    // Replay registry: for each persisted entry, attach its source to the
+    // watcher so pre-existing files are rediscovered and re-tracked. The
+    // provision path in handleFileDiscovered checks state.getSource and
+    // resumes from the stored offset when one exists.
+    for (const entry of this.state.listRegistry()) {
+      try {
+        await this.watcher.addSource(entry.sourceConfig);
+      } catch (err) {
+        console.warn(
+          `[runtime] failed to re-attach source "${entry.sourceConfig.name}" (id=${entry.id}) during start: ${(err as Error).message}`,
+        );
+      }
+    }
   }
 
   async stop(): Promise<void> {
@@ -125,17 +150,116 @@ export class Relay {
     await this.state.flush();
   }
 
+  // ---- dynamic source registration ---------------------------------------
+
+  // Register a new source at runtime. Idempotent by (configPath,
+  // sourceConfig.name): if an entry with the same pair already exists,
+  // returns its id without creating a duplicate or re-attaching the
+  // watcher. Otherwise generates a fresh `rl_xxx` id, persists the
+  // registry entry, and attaches the source to the watcher (which will
+  // begin emitting 'fileDiscovered').
+  async addSource(
+    sourceConfig: SourceConfig,
+    configPath: string,
+  ): Promise<string> {
+    const existing = this.state
+      .listRegistry()
+      .find(
+        (e) =>
+          e.configPath === configPath && e.sourceConfig.name === sourceConfig.name,
+      );
+    if (existing) return existing.id;
+
+    const id = this.state.generateRelayId();
+    const entry: RegistryEntry = {
+      id,
+      configPath,
+      sourceConfig,
+      addedAt: new Date().toISOString(),
+    };
+    this.state.addRegistry(entry);
+    await this.watcher.addSource(sourceConfig);
+    return id;
+  }
+
+  // Unregister a source. Returns true if the id was found (and removed),
+  // false otherwise. Cascades: stops the directory watcher, untracks tailed
+  // files, drops the registry entry, and drops every sources[filePath]
+  // entry whose relayId matches (the cascade is driven by
+  // state.removeRegistry). State is persisted via the autosave pipeline
+  // plus an explicit flush so callers see durable state on return.
+  async removeSource(id: string): Promise<boolean> {
+    const entry = this.state.getRegistry(id);
+    if (!entry) return false;
+
+    // Stop the directory watcher + untrack tails. Do this before dropping
+    // state so the watcher's own cleanup doesn't race with state mutation.
+    try {
+      await this.watcher.removeSource(entry.sourceConfig.name);
+    } catch (err) {
+      console.warn(
+        `[runtime] watcher.removeSource("${entry.sourceConfig.name}") threw: ${(err as Error).message}`,
+      );
+    }
+
+    // Snapshot the per-file tracking entries before removeRegistry cascades
+    // them away — we don't need them for anything beyond logging, but having
+    // them on hand makes debug traces useful.
+    const tracked = this.state.listSourcesByRelayId(id);
+    void tracked; // reserved for future debug logging
+
+    this.state.removeRegistry(id);
+    await this.state.flush();
+    return true;
+  }
+
+  // Flat projection from registry + state. `filesTracked` counts
+  // sources[filePath] entries whose relayId matches; `disabled` is true if
+  // every tracked file is disabled (or there are no tracked files and the
+  // entry is disabled-by-default, which is never the case here — so in
+  // practice: true iff there is at least one tracked file and they are all
+  // disabled). Conservative: `false` when there are zero tracked files.
+  listSources(): ListedSource[] {
+    const out: ListedSource[] = [];
+    for (const entry of this.state.listRegistry()) {
+      const files = this.state.listSourcesByRelayId(entry.id);
+      const filesTracked = files.length;
+      const disabled =
+        filesTracked > 0 && files.every((f) => f.state.disabled === true);
+      const listed: ListedSource = {
+        id: entry.id,
+        configPath: entry.configPath,
+        sourceName: entry.sourceConfig.name,
+        provider: entry.sourceConfig.provider,
+        filesTracked,
+        disabled,
+      };
+      if (entry.sourceConfig.groupId !== undefined) {
+        listed.groupId = entry.sourceConfig.groupId;
+      }
+      out.push(listed);
+    }
+    return out;
+  }
+
+  // ---- internals ---------------------------------------------------------
+
   private async handleFileDiscovered(
     filePath: string,
     sourceName: string,
   ): Promise<void> {
-    const source = this.sourcesByName.get(sourceName);
-    if (!source) {
+    // Look up the registry entry by source name. Registry is the single
+    // source of truth; we need the relayId to stamp on SourceState.
+    const entry = this.state
+      .listRegistry()
+      .find((e) => e.sourceConfig.name === sourceName);
+    if (!entry) {
       console.warn(
-        `[runtime] fileDiscovered for unknown source "${sourceName}" (${filePath}); ignoring`,
+        `[runtime] fileDiscovered for unregistered source "${sourceName}" (${filePath}); ignoring`,
       );
       return;
     }
+    const source = entry.sourceConfig;
 
     const existing = this.state.getSource(filePath);
     if (existing) {
@@ -163,6 +287,17 @@ export class Relay {
       return;
     }
 
+    // Phase 2 guard: telegram sources must carry a numeric `groupId`. We
+    // check here (in addition to the config loader) so runtime callers that
+    // bypass `loadConfig` — e.g. tests that hand-craft a SourceConfig — still
+    // get a loud, localized failure rather than a cryptic Telegram API error.
+    if (source.provider === 'telegram' && source.groupId === undefined) {
+      console.warn(
+        `[runtime] telegram source "${sourceName}" missing group_id; cannot provision ${filePath}`,
+      );
+      return;
+    }
+
     const filenameStem = path.basename(filePath, path.extname(filePath));
     // Providers that have a user-visible topic/channel name (e.g. Telegram
     // forum topics) derive it from `meta.filenameStem`. Developers who want a
@@ -171,12 +306,14 @@ export class Relay {
 
     let destination;
     try {
-      destination = await provider.provision({
-        sourceName,
-        filenameStem,
-        filePath,
-        providerGroup: source.group || undefined,
-      });
+      destination = await provider.provision(
+        {
+          sourceName,
+          filenameStem,
+          filePath,
+        },
+        source,
+      );
     } catch (err) {
       // Loud log; do NOT track. V2: queue for retry with backoff.
       console.warn(
@@ -207,6 +344,7 @@ export class Relay {
     const destinationKey = provider.destinationKey(destination);
     this.state.setSource(filePath, {
       sourceName,
+      relayId: entry.id,
       offset,
       destination,
       destinationKey,
@@ -235,4 +373,18 @@ export function installSignalHandlers(relay: Relay): void {
   };
   process.once('SIGINT', () => shutdown('SIGINT'));
   process.once('SIGTERM', () => shutdown('SIGTERM'));
+}
+
+// Helper: build the `resolveSource` closure the dispatcher expects. Runtime
+// consumers wire it as `new RelayDispatcher({ resolveSource: buildResolveSource(state), ... })`.
+// Isolated here rather than inlined at the call site so callers (tests,
+// future CLI) don't re-implement the same lambda.
+export function buildResolveSource(
+  state: RelayState,
+): (sourceName: string) => SourceConfig | undefined {
+  return (sourceName: string) =>
+    state
+      .listRegistry()
+      .map((e) => e.sourceConfig)
+      .find((s) => s.name === sourceName);
 }

@@ -25,6 +25,13 @@ import type {
   Provider,
 } from '../src/providers/types.ts';
 
+// Build a resolveSource closure over a fixed list of SourceConfigs. Dispatch
+// tests exercise the closure directly; the runtime builds it from
+// state.listRegistry() in production (see src/runtime.ts → buildResolveSource).
+function resolver(sources: SourceConfig[]): (n: string) => SourceConfig | undefined {
+  return (n) => sources.find((s) => s.name === n);
+}
+
 // The dispatcher only uses `.on`, `.off`, and `.emit` on the watcher. A
 // plain EventEmitter cast to the watcher type is enough to drive tests
 // without spinning up chokidar.
@@ -49,9 +56,19 @@ function makeSource(overrides: Partial<SourceConfig> = {}): SourceConfig {
     name: 'test-src',
     pathGlob: '/unused/*.jsonl',
     provider: 'stub',
-    group: 'grp',
     inboundTypes: ['human_input'],
     tiers: { 'call.placed': 'silent', 'call.outcome': 'notify', noisy: 'ignore' },
+    ...overrides,
+  };
+}
+
+function makeSourceState(overrides: Partial<SourceState> = {}): SourceState {
+  return {
+    sourceName: 'test-src',
+    relayId: 'rl_test00',
+    offset: 0,
+    destination: { key: 'k1' },
+    destinationKey: 'stub://k1',
     ...overrides,
   };
 }
@@ -112,9 +129,6 @@ async function* defaultEmptyReceive(
     signal.addEventListener('abort', () => resolve(), { once: true });
   });
 }
-
-// Give the debounced autosave a chance to run before we read back state.
-const SAVE_DEBOUNCE_MS = 550;
 
 // ---------------------------------------------------------------------------
 // StdoutProvider unit tests
@@ -250,16 +264,10 @@ describe('RelayDispatcher outbound', () => {
     const watcher = fakeWatcher();
 
     const filePath = '/tmp/happy.jsonl';
-    const initial: SourceState = {
-      sourceName: source.name,
-      offset: 0,
-      destination: { key: 'k1' },
-      destinationKey: 'stub://k1',
-    };
-    state.setSource(filePath, initial);
+    state.setSource(filePath, makeSourceState({ sourceName: source.name }));
 
     const dispatcher = new RelayDispatcher({
-      sources: [source],
+      resolveSource: resolver([source]),
       state,
       providers: new Map([['stub', provider]]),
       watcher,
@@ -296,15 +304,10 @@ describe('RelayDispatcher outbound', () => {
     const watcher = fakeWatcher();
 
     const filePath = '/tmp/tier.jsonl';
-    state.setSource(filePath, {
-      sourceName: source.name,
-      offset: 0,
-      destination: { key: 'k1' },
-      destinationKey: 'stub://k1',
-    });
+    state.setSource(filePath, makeSourceState({ sourceName: source.name }));
 
     const dispatcher = new RelayDispatcher({
-      sources: [source],
+      resolveSource: resolver([source]),
       state,
       providers: new Map([['stub', provider]]),
       watcher,
@@ -332,15 +335,10 @@ describe('RelayDispatcher outbound', () => {
     const watcher = fakeWatcher();
 
     const filePath = '/tmp/loop.jsonl';
-    state.setSource(filePath, {
-      sourceName: source.name,
-      offset: 0,
-      destination: { key: 'k1' },
-      destinationKey: 'stub://k1',
-    });
+    state.setSource(filePath, makeSourceState({ sourceName: source.name }));
 
     const d = new RelayDispatcher({
-      sources: [source],
+      resolveSource: resolver([source]),
       state,
       providers: new Map([['stub', provider]]),
       watcher,
@@ -371,15 +369,10 @@ describe('RelayDispatcher outbound', () => {
     const watcher = fakeWatcher();
 
     const filePath = '/tmp/ignore.jsonl';
-    state.setSource(filePath, {
-      sourceName: source.name,
-      offset: 0,
-      destination: { key: 'k1' },
-      destinationKey: 'stub://k1',
-    });
+    state.setSource(filePath, makeSourceState({ sourceName: source.name }));
 
     const d = new RelayDispatcher({
-      sources: [source],
+      resolveSource: resolver([source]),
       state,
       providers: new Map([['stub', provider]]),
       watcher,
@@ -415,15 +408,10 @@ describe('RelayDispatcher outbound', () => {
     const watcher = fakeWatcher();
 
     const filePath = '/tmp/disable.jsonl';
-    state.setSource(filePath, {
-      sourceName: source.name,
-      offset: 0,
-      destination: { key: 'k1' },
-      destinationKey: 'stub://k1',
-    });
+    state.setSource(filePath, makeSourceState({ sourceName: source.name }));
 
     const d = new RelayDispatcher({
-      sources: [source],
+      resolveSource: resolver([source]),
       state,
       providers: new Map([['stub', provider]]),
       watcher,
@@ -456,15 +444,10 @@ describe('RelayDispatcher outbound', () => {
     const watcher = fakeWatcher();
 
     const filePath = '/tmp/transient.jsonl';
-    state.setSource(filePath, {
-      sourceName: source.name,
-      offset: 0,
-      destination: { key: 'k1' },
-      destinationKey: 'stub://k1',
-    });
+    state.setSource(filePath, makeSourceState({ sourceName: source.name }));
 
     const d = new RelayDispatcher({
-      sources: [source],
+      resolveSource: resolver([source]),
       state,
       providers: new Map([['stub', provider]]),
       watcher,
@@ -492,15 +475,10 @@ describe('RelayDispatcher outbound', () => {
     const watcher = fakeWatcher();
 
     const filePath = '/tmp/malformed.jsonl';
-    state.setSource(filePath, {
-      sourceName: source.name,
-      offset: 0,
-      destination: { key: 'k1' },
-      destinationKey: 'stub://k1',
-    });
+    state.setSource(filePath, makeSourceState({ sourceName: source.name }));
 
     const d = new RelayDispatcher({
-      sources: [source],
+      resolveSource: resolver([source]),
       state,
       providers: new Map([['stub', provider]]),
       watcher,
@@ -532,7 +510,7 @@ describe('RelayDispatcher outbound', () => {
     const watcher = fakeWatcher();
 
     const d = new RelayDispatcher({
-      sources: [source],
+      resolveSource: resolver([source]),
       state,
       providers: new Map([['stub', provider]]),
       watcher,
@@ -552,6 +530,46 @@ describe('RelayDispatcher outbound', () => {
     await d.stop();
   });
 
+  it('source removed mid-dispatch: resolveSource returns undefined, line dropped', async () => {
+    // Simulates a registry entry being removed between discovery/persistence
+    // and a later 'line' event (e.g. removeSource races with an in-flight
+    // append). The dispatcher should drop the line rather than crash.
+    const statePath = await mkTmpStatePath('removed-mid');
+    const state = await RelayState.load(statePath);
+    const source = makeSource();
+    const provider = new StubProvider();
+    const watcher = fakeWatcher();
+
+    // Source list is initially populated, then cleared to simulate removal.
+    const live: SourceConfig[] = [source];
+    const filePath = '/tmp/removed-mid.jsonl';
+    state.setSource(filePath, makeSourceState({ sourceName: source.name }));
+
+    const d = new RelayDispatcher({
+      resolveSource: (n) => live.find((s) => s.name === n),
+      state,
+      providers: new Map([['stub', provider]]),
+      watcher,
+    });
+    d.start();
+
+    // Remove the source — resolveSource now returns undefined.
+    live.length = 0;
+
+    watcher.emit(
+      'line',
+      lineEvent({ filePath, lineEndOffset: 60 }),
+    );
+    await delay(20);
+
+    // Provider never called, state offset untouched (dispatcher short-circuits
+    // on unknown source before touching state).
+    assert.equal(provider.calls.length, 0);
+    assert.equal(state.getSource(filePath)?.offset, 0);
+
+    await d.stop();
+  });
+
   it('unprovisioned file: drops line without calling provider', async () => {
     const statePath = await mkTmpStatePath('unprovisioned');
     const state = await RelayState.load(statePath);
@@ -561,7 +579,7 @@ describe('RelayDispatcher outbound', () => {
 
     // Note: state.setSource is NOT called; the file is unprovisioned.
     const d = new RelayDispatcher({
-      sources: [source],
+      resolveSource: resolver([source]),
       state,
       providers: new Map([['stub', provider]]),
       watcher,
@@ -590,15 +608,10 @@ describe('RelayDispatcher outbound', () => {
     const watcher = fakeWatcher();
 
     const filePath = '/tmp/custom-key.jsonl';
-    state.setSource(filePath, {
-      sourceName: source.name,
-      offset: 0,
-      destination: { key: 'k1' },
-      destinationKey: 'stub://k1',
-    });
+    state.setSource(filePath, makeSourceState({ sourceName: source.name }));
 
     const d = new RelayDispatcher({
-      sources: [source],
+      resolveSource: resolver([source]),
       state,
       providers: new Map([['stub', provider]]),
       watcher,
@@ -660,17 +673,17 @@ describe('RelayDispatcher outbound', () => {
     const watcher = fakeWatcher();
 
     const filePath = '/tmp/skip.jsonl';
-    state.setSource(filePath, {
-      sourceName: source.name,
-      offset: 0,
-      destination: { key: 'k1' },
-      destinationKey: 'stub://k1',
-      disabled: true,
-      disabledReason: 'previously disabled',
-    });
+    state.setSource(
+      filePath,
+      makeSourceState({
+        sourceName: source.name,
+        disabled: true,
+        disabledReason: 'previously disabled',
+      }),
+    );
 
     const d = new RelayDispatcher({
-      sources: [source],
+      resolveSource: resolver([source]),
       state,
       providers: new Map([['stub', provider]]),
       watcher,
@@ -710,15 +723,10 @@ describe('RelayDispatcher inbound', () => {
     const watcher = fakeWatcher();
 
     const filePath = await mkTmpFile('inbound');
-    state.setSource(filePath, {
-      sourceName: source.name,
-      offset: 0,
-      destination: { key: 'k1' },
-      destinationKey: 'stub://k1',
-    });
+    state.setSource(filePath, makeSourceState({ sourceName: source.name }));
 
     const d = new RelayDispatcher({
-      sources: [source],
+      resolveSource: resolver([source]),
       state,
       providers: new Map([['stub', provider]]),
       watcher,
@@ -756,15 +764,17 @@ describe('RelayDispatcher inbound', () => {
     const watcher = fakeWatcher();
 
     const filePath = await mkTmpFile('inbound-fallback');
-    state.setSource(filePath, {
-      sourceName: source.name,
-      offset: 0,
-      destination: { key: 'k2' },
-      destinationKey: 'stub://k2',
-    });
+    state.setSource(
+      filePath,
+      makeSourceState({
+        sourceName: source.name,
+        destination: { key: 'k2' },
+        destinationKey: 'stub://k2',
+      }),
+    );
 
     const d = new RelayDispatcher({
-      sources: [source],
+      resolveSource: resolver([source]),
       state,
       providers: new Map([['stub', provider]]),
       watcher,
@@ -801,15 +811,10 @@ describe('RelayDispatcher inbound', () => {
 
     const watcher = fakeWatcher();
     const filePath = await mkTmpFile('inbound-tier-key');
-    state.setSource(filePath, {
-      sourceName: source.name,
-      offset: 0,
-      destination: { key: 'k1' },
-      destinationKey: 'stub://k1',
-    });
+    state.setSource(filePath, makeSourceState({ sourceName: source.name }));
 
     const d = new RelayDispatcher({
-      sources: [source],
+      resolveSource: resolver([source]),
       state,
       providers: new Map([['stub', provider]]),
       watcher,
@@ -847,15 +852,17 @@ describe('RelayDispatcher inbound', () => {
 
     // Map a DIFFERENT destination so 'nope' is unknown.
     const filePath = await mkTmpFile('inbound-unknown');
-    state.setSource(filePath, {
-      sourceName: source.name,
-      offset: 0,
-      destination: { key: 'known' },
-      destinationKey: 'stub://known',
-    });
+    state.setSource(
+      filePath,
+      makeSourceState({
+        sourceName: source.name,
+        destination: { key: 'known' },
+        destinationKey: 'stub://known',
+      }),
+    );
 
     const d = new RelayDispatcher({
-      sources: [source],
+      resolveSource: resolver([source]),
       state,
       providers: new Map([['stub', provider]]),
       watcher,

@@ -13,6 +13,11 @@
 // belongs to the runtime module that also owns startup-scan and backfill.
 // Dispatch cares only about 'line' events and inbound events.
 //
+// Source resolution: dispatch does NOT own a static source list anymore.
+// The runtime (which owns the registry) passes a `resolveSource(name)`
+// closure. This keeps dispatch stateless w.r.t. source registration and
+// lets sources be added/removed at runtime without touching this module.
+//
 // Error / retry policy:
 //   - deliver → { ok: false, disableMapping: true }: call state.disableSource,
 //     do NOT advance offset. On reconfig + re-enable, the same line retries.
@@ -29,20 +34,21 @@ import type { RelayState, SourceState } from './state.js';
 import { renderLine } from './render.ts';
 
 export interface RelayDispatcherOptions {
-  sources: SourceConfig[];
+  // Lookup for a source config by name. Runtime supplies this — typically a
+  // closure over `state.listRegistry()` so the registry is the single source
+  // of truth. Returning undefined causes the line to be dropped (unknown
+  // source).
+  resolveSource: (sourceName: string) => SourceConfig | undefined;
   state: RelayState;
   providers: Map<string, Provider>;
   watcher: RelayWatcher;
 }
 
 export class RelayDispatcher {
-  private readonly sources: SourceConfig[];
+  private readonly resolveSource: (sourceName: string) => SourceConfig | undefined;
   private readonly state: RelayState;
   private readonly providers: Map<string, Provider>;
   private readonly watcher: RelayWatcher;
-
-  // Indexed once at construction for O(1) source lookup on every 'line' event.
-  private readonly sourcesByName: Map<string, SourceConfig>;
 
   // Bound handler kept on `this` so start()/stop() can add/remove the same
   // function reference.
@@ -57,11 +63,10 @@ export class RelayDispatcher {
   private stopped = false;
 
   constructor(opts: RelayDispatcherOptions) {
-    this.sources = opts.sources;
+    this.resolveSource = opts.resolveSource;
     this.state = opts.state;
     this.providers = opts.providers;
     this.watcher = opts.watcher;
-    this.sourcesByName = new Map(this.sources.map((s) => [s.name, s]));
     this.onLine = (ev) => {
       // Fire-and-forget: the watcher emits synchronously, but our handler is
       // async. We intentionally do NOT block the event loop here. The state
@@ -103,7 +108,7 @@ export class RelayDispatcher {
   // --- outbound (watcher → provider) ---------------------------------------
 
   private async handleLine(ev: LineEvent): Promise<void> {
-    const source = this.sourcesByName.get(ev.sourceName);
+    const source = this.resolveSource(ev.sourceName);
     if (!source) {
       // Unknown source — log and skip. Advancing offset would require a
       // state entry we don't have, so this is effectively a no-op.
@@ -256,7 +261,7 @@ export class RelayDispatcher {
       return;
     }
 
-    const source = this.sourcesByName.get(hit.state.sourceName);
+    const source = this.resolveSource(hit.state.sourceName);
     if (!source) {
       console.warn(
         `[dispatch] inbound event mapped to unknown source "${hit.state.sourceName}"; skipping`,

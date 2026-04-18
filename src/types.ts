@@ -3,18 +3,23 @@
 // Per-type delivery policy. See relay.md §Provider contract: the four primitives.
 export type Tier = 'silent' | 'notify' | 'ignore';
 
-// Telegram provider credentials and named group IDs. See relay.md §Configuration schema.
-export interface TelegramProviderConfig {
-  botToken: string;
-  groups: Record<string, number>;
-}
-
 // One entry of `sources[]` in relay.config.yaml. See relay.md §Configuration schema.
+//
+// Phase 2: credentials (bot tokens) no longer live in the config file — they
+// come from the relay repo's own `.env` via `src/credentials.ts`. The
+// destination chat id is now carried per-source as `groupId` (raw numeric id),
+// replacing the former named-reference indirection through a `providers:`
+// block.
 export interface SourceConfig {
   name: string;
   pathGlob: string;
   provider: string;
-  group: string;
+  // Raw numeric chat id for providers that address destinations by group
+  // (Telegram supergroup ids — negative integers starting with -100).
+  // Optional at the type level so other providers (stdout, iMessage, email)
+  // don't need one, but required at config-load time whenever
+  // `provider === 'telegram'`.
+  groupId?: number;
   inboundTypes: string[];
   tiers: Record<string, Tier>;
   // Field name to consult on each JSONL entry for loopback/tier lookups and
@@ -26,10 +31,10 @@ export interface SourceConfig {
 }
 
 // Top-level shape of relay.config.yaml. See relay.md §Configuration schema.
+// Phase 2: there is no top-level `providers:` block anymore; the file
+// declares only sources, and credentials come from `.env` (see
+// src/credentials.ts).
 export interface RelayConfig {
-  providers: {
-    telegram?: TelegramProviderConfig;
-  };
   sources: SourceConfig[];
 }
 
@@ -46,11 +51,12 @@ export interface JsonlEntry {
 
 // Passed to provider.provision when a new source file is discovered. See relay.md §Startup and backfill behavior.
 //
-// `providerGroup` is the name of the provider-side group/channel/space the source
-// belongs to (e.g. Telegram's `groups` map key). It is optional on the interface
-// because not every provider needs it (iMessage, email have no group concept),
-// but the Telegram provider requires it to resolve `groups[providerGroup]` →
-// numeric chat id. Core populates it from `SourceConfig.group`.
+// Phase 2: the former `providerGroup` field is gone. Providers that need a
+// per-source destination address (Telegram's numeric chat id) read it from
+// the `SourceConfig` passed alongside `SourceMetadata` at provision time —
+// the runtime hands both in. That keeps `SourceMetadata` focused on
+// file-identity fields and leaves provider-specific wiring on the config
+// object the caller already holds.
 //
 // Topic titles are always derived from `filenameStem` by providers that need a
 // user-visible title (e.g. Telegram forum topics). Developers who want a
@@ -59,5 +65,4 @@ export interface SourceMetadata {
   sourceName: string;
   filenameStem: string;
   filePath: string;
-  providerGroup?: string;
 }

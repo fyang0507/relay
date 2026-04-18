@@ -1,6 +1,6 @@
 // Provider interface. See relay.md §Provider contract: the four primitives.
 
-import type { SourceMetadata, Tier } from '../types.js';
+import type { SourceConfig, SourceMetadata, Tier } from '../types.js';
 
 // Opaque, provider-defined address for a destination (e.g. Telegram topic handle).
 // See relay.md §Provider contract: the four primitives.
@@ -21,10 +21,17 @@ export interface InboundEvent {
 }
 
 // The four-primitive provider contract. See relay.md §Provider contract: the four primitives.
+//
+// `provision` receives both the `SourceMetadata` (file-identity fields:
+// filenameStem, filePath, sourceName) and the `SourceConfig` (the full
+// config entry the runtime resolved for this source). Providers that need
+// source-scoped wiring — e.g. Telegram reading `groupId` — pull it off
+// sourceConfig; providers that don't need anything beyond the metadata
+// (stdout) simply ignore the second arg.
 export interface Provider {
   name: string;
   deliver(destination: Destination, text: string, tier: Tier): Promise<DeliverResult>;
-  provision(meta: SourceMetadata): Promise<Destination>;
+  provision(meta: SourceMetadata, sourceConfig: SourceConfig): Promise<Destination>;
   receive(signal: AbortSignal): AsyncIterable<InboundEvent>;
   // Stable string key for a destination. Core dispatch uses this to look up
   // source-by-destination on inbound events. Must be deterministic per destination.

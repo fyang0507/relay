@@ -1,8 +1,9 @@
 // Persistent state store. See relay.md §Startup and backfill behavior.
 //
 // Single JSON file at ~/.relay/state.json. Tracks:
-//   - per-source-file offset and mapped destination
+//   - per-source-file offset and mapped destination (keyed by filePath)
 //   - per-provider generic key/value bag (e.g. telegram update_id cursor)
+//   - registry: runtime-registered source configs keyed by `rl_xxx` id
 //
 // Writes are debounced (~500ms) and serialized through an internal queue; each
 // save is an atomic write (tmp → fsync → rename). Single-process daemon — no
@@ -11,12 +12,18 @@
 import { promises as fs } from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
+import { randomBytes } from 'node:crypto';
 
 import type { Destination } from './providers/types.js';
+import type { SourceConfig } from './types.js';
 
 // Persisted per-source-file state. See relay.md §Startup and backfill behavior.
+// `relayId` links this tracked file back to the registry entry that owns it
+// (v2 schema). Removing a registry entry cascades to all sources[filePath]
+// entries whose `relayId` matches.
 export interface SourceState {
   sourceName: string;
+  relayId: string;
   offset: number;
   destination: Destination;
   destinationKey: string;
@@ -24,15 +31,26 @@ export interface SourceState {
   disabledReason?: string;
 }
 
-// On-disk shape. `version` lets us migrate in future.
+// Registry entry: one per runtime-registered source. Keyed by `rl_xxx` id in
+// the state file's top-level `registry` section.
+export interface RegistryEntry {
+  id: string;                  // same as the map key
+  configPath: string;          // absolute path of the YAML config this was loaded from
+  sourceConfig: SourceConfig;  // fully resolved + validated
+  addedAt: string;             // ISO 8601 UTC
+}
+
+// On-disk shape (schema v2). `version` lets us migrate in future.
 export interface RelayStateShape {
-  version: 1;
+  version: 2;
   sources: Record<string, SourceState>;
   providers: Record<string, Record<string, unknown>>;
+  registry: Record<string, RegistryEntry>;
 }
 
 const DEFAULT_STATE_PATH = path.join(os.homedir(), '.relay', 'state.json');
 const AUTOSAVE_DEBOUNCE_MS = 500;
+const RELAY_ID_MAX_RETRIES = 10;
 
 function expandHome(p: string): string {
   if (p === '~') return os.homedir();
@@ -41,7 +59,7 @@ function expandHome(p: string): string {
 }
 
 function freshState(): RelayStateShape {
-  return { version: 1, sources: {}, providers: {} };
+  return { version: 2, sources: {}, providers: {}, registry: {} };
 }
 
 export class RelayState {
@@ -63,14 +81,25 @@ export class RelayState {
     let data: RelayStateShape;
     try {
       const raw = await fs.readFile(resolved, 'utf8');
-      const parsed = JSON.parse(raw) as Partial<RelayStateShape>;
+      const parsed = JSON.parse(raw) as Partial<RelayStateShape> & {
+        version?: number;
+      };
+      // Reject any state file that isn't v2. No auto-migration — operators
+      // must clear the file and re-register sources.
+      if (parsed.version !== 2) {
+        throw new Error(
+          `State file at ${resolved} is v${parsed.version ?? '<unknown>'}; this relay requires v2. Remove the file and re-register sources.`,
+        );
+      }
       data = {
-        version: 1,
+        version: 2,
         sources: parsed.sources ?? {},
         providers: parsed.providers ?? {},
+        registry: parsed.registry ?? {},
       };
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+        // Fresh state. Treated as v2 from the start.
         data = freshState();
       } else {
         throw err;
@@ -88,6 +117,14 @@ export class RelayState {
     this.scheduleSave();
   }
 
+  // Remove a single source-file entry. Returns true if anything was removed.
+  removeSource(filePath: string): boolean {
+    if (!(filePath in this.data.sources)) return false;
+    delete this.data.sources[filePath];
+    this.scheduleSave();
+    return true;
+  }
+
   findSourceByDestinationKey(
     key: string,
   ): { filePath: string; state: SourceState } | undefined {
@@ -95,6 +132,16 @@ export class RelayState {
       if (state.destinationKey === key) return { filePath, state };
     }
     return undefined;
+  }
+
+  // Return [filePath, state] pairs for every tracked source file belonging to
+  // a given registry id. Used by `removeRegistry` and the runtime cleanup path.
+  listSourcesByRelayId(relayId: string): Array<{ filePath: string; state: SourceState }> {
+    const out: Array<{ filePath: string; state: SourceState }> = [];
+    for (const [filePath, state] of Object.entries(this.data.sources)) {
+      if (state.relayId === relayId) out.push({ filePath, state });
+    }
+    return out;
   }
 
   getProviderState(providerName: string): Record<string, unknown> {
@@ -125,6 +172,50 @@ export class RelayState {
     s.disabled = true;
     s.disabledReason = reason;
     this.scheduleSave();
+  }
+
+  // ---- registry (schema v2) -----------------------------------------------
+
+  addRegistry(entry: RegistryEntry): void {
+    this.data.registry[entry.id] = entry;
+    this.scheduleSave();
+  }
+
+  // Remove a registry entry. Cascades: also drops every sources[filePath]
+  // whose `relayId === id`. Returns the removed entry, or undefined if none.
+  removeRegistry(id: string): RegistryEntry | undefined {
+    const existing = this.data.registry[id];
+    if (!existing) return undefined;
+    delete this.data.registry[id];
+    // Cascade.
+    for (const [filePath, state] of Object.entries(this.data.sources)) {
+      if (state.relayId === id) {
+        delete this.data.sources[filePath];
+      }
+    }
+    this.scheduleSave();
+    return existing;
+  }
+
+  listRegistry(): RegistryEntry[] {
+    return Object.values(this.data.registry).map((e) => ({ ...e }));
+  }
+
+  getRegistry(id: string): RegistryEntry | undefined {
+    const e = this.data.registry[id];
+    return e ? { ...e } : undefined;
+  }
+
+  // Generate a fresh `rl_xxxxxx` id. 6 lowercase hex chars from 3 random bytes.
+  // Retries on collision with live registry entries up to 10 attempts.
+  generateRelayId(): string {
+    for (let i = 0; i < RELAY_ID_MAX_RETRIES; i++) {
+      const id = `rl_${randomBytes(3).toString('hex')}`;
+      if (!(id in this.data.registry)) return id;
+    }
+    throw new Error(
+      `generateRelayId: could not find a non-colliding id after ${RELAY_ID_MAX_RETRIES} attempts`,
+    );
   }
 
   // Debounced autosave. Successive writes within the window coalesce.

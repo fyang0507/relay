@@ -19,18 +19,18 @@
 //    republished as a new outbound message — a classic echo loop. We prefer
 //    quiet correctness (inject + warn) over rejecting the config, since
 //    rejecting would block startup on a warning-severity misconfiguration.
+//
+// Phase 2 split: the config file no longer declares provider credentials or
+// named group references. Bot tokens live in the relay repo's own `.env`
+// (see src/credentials.ts), and each source carries its raw destination
+// `group_id` directly. The top-level `providers:` block has been removed.
 
 import fsp from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import YAML from 'yaml';
 
-import type {
-  RelayConfig,
-  SourceConfig,
-  TelegramProviderConfig,
-  Tier,
-} from './types.ts';
+import type { RelayConfig, SourceConfig, Tier } from './types.ts';
 
 // Return shape of loadConfig. `warnings` may include the echo-loop auto-inject
 // notice and any other non-fatal diagnostics.
@@ -40,6 +40,10 @@ export interface LoadConfigResult {
 }
 
 const VALID_TIERS: ReadonlyArray<Tier> = ['silent', 'notify', 'ignore'];
+
+// Providers the loader knows have group-id semantics. Other providers
+// (stdout) don't require a `group_id`.
+const PROVIDERS_REQUIRING_GROUP_ID: ReadonlySet<string> = new Set(['telegram']);
 
 function expandHome(p: string): string {
   if (p === '~') return os.homedir();
@@ -107,25 +111,6 @@ function requireArray(v: unknown, pathStr: string): unknown[] {
   return v;
 }
 
-function validateTelegramProvider(
-  raw: unknown,
-  pathStr: string,
-): TelegramProviderConfig {
-  const obj = requireObject(raw, pathStr);
-  const botToken = requireNonEmptyString(obj.bot_token, `${pathStr}.bot_token`);
-  const groupsRaw = requireObject(obj.groups, `${pathStr}.groups`);
-  const groups: Record<string, number> = {};
-  for (const [name, val] of Object.entries(groupsRaw)) {
-    if (typeof val !== 'number' || !Number.isFinite(val)) {
-      throw new Error(
-        `Invalid config at ${pathStr}.groups.${name}: expected number (Telegram chat id)`,
-      );
-    }
-    groups[name] = val;
-  }
-  return { botToken, groups };
-}
-
 function validateTiers(
   raw: unknown,
   pathStr: string,
@@ -146,41 +131,43 @@ function validateTiers(
 function validateSource(
   raw: unknown,
   pathStr: string,
-  providerNames: Set<string>,
-  providerGroupMap: Map<string, Set<string> | null>,
   warnings: string[],
 ): SourceConfig {
   const obj = requireObject(raw, pathStr);
   const name = requireNonEmptyString(obj.name, `${pathStr}.name`);
   const pathGlob = requireNonEmptyString(obj.path_glob, `${pathStr}.path_glob`);
   const provider = requireNonEmptyString(obj.provider, `${pathStr}.provider`);
-  if (!providerNames.has(provider)) {
-    throw new Error(
-      `Invalid config at ${pathStr}.provider: "${provider}" is not a configured provider (have: ${[...providerNames].join(', ') || '<none>'})`,
-    );
-  }
 
-  // `group` is required for telegram (to resolve chat id) and ignored for stdout.
-  // For unknown/other providers we require presence but accept any string.
-  let group = '';
-  if (obj.group !== undefined) {
-    group = requireNonEmptyString(obj.group, `${pathStr}.group`);
-  }
-  const providerGroups = providerGroupMap.get(provider);
-  if (providerGroups != null) {
-    // This provider has a defined group set (telegram). `group` must reference one.
-    if (group === '') {
+  // `group_id` validation. For providers that require one (telegram), the
+  // value must be a finite integer. Telegram supergroup ids are negative
+  // (start with -100...), so we enforce that too — a positive id is almost
+  // certainly a misconfiguration (e.g. a user id, not a chat id).
+  let groupId: number | undefined;
+  if (obj.group_id !== undefined) {
+    if (typeof obj.group_id !== 'number' || !Number.isFinite(obj.group_id)) {
       throw new Error(
-        `Invalid config at ${pathStr}.group: required for provider "${provider}"`,
+        `Invalid config at ${pathStr}.group_id: expected number (chat id)`,
       );
     }
-    if (!providerGroups.has(group)) {
+    if (!Number.isInteger(obj.group_id)) {
       throw new Error(
-        `Invalid config at ${pathStr}.group: "${group}" is not a configured group for provider "${provider}" (have: ${[...providerGroups].join(', ') || '<none>'})`,
+        `Invalid config at ${pathStr}.group_id: expected integer, got ${obj.group_id}`,
+      );
+    }
+    groupId = obj.group_id;
+  }
+  if (PROVIDERS_REQUIRING_GROUP_ID.has(provider)) {
+    if (groupId === undefined) {
+      throw new Error(
+        `Invalid config at ${pathStr}.group_id: required for provider "${provider}"`,
+      );
+    }
+    if (provider === 'telegram' && groupId >= 0) {
+      throw new Error(
+        `Invalid config at ${pathStr}.group_id: Telegram supergroup ids are negative (start with -100...); got ${groupId}`,
       );
     }
   }
-  // For providers with no group map (e.g. stdout), group is ignored.
 
   let inboundTypes: string[];
   if (obj.inbound_types === undefined) {
@@ -212,10 +199,12 @@ function validateSource(
     name,
     pathGlob,
     provider,
-    group,
     inboundTypes,
     tiers,
   };
+  if (groupId !== undefined) {
+    out.groupId = groupId;
+  }
   // Optional per-source `tier_key`. When absent, consumers default to `"type"`
   // at the call site (see src/dispatch.ts and src/render.ts) — we deliberately
   // do NOT inject a default here so the raw config stays a faithful view of
@@ -261,33 +250,6 @@ export async function loadConfig(
   const expanded = expandEnv(parsed, '');
 
   const top = requireObject(expanded, '<root>');
-  const providersRaw = requireObject(top.providers, 'providers');
-  const providerNames = new Set<string>(Object.keys(providersRaw));
-  if (providerNames.size === 0) {
-    throw new Error(
-      `Invalid config at providers: at least one provider must be configured`,
-    );
-  }
-
-  // Provider group map tells us which group names each provider accepts.
-  // null = this provider has no group constraint (sources ignore `group`).
-  const providerGroupMap = new Map<string, Set<string> | null>();
-  const providersOut: RelayConfig['providers'] = {};
-  if ('telegram' in providersRaw) {
-    const tg = validateTelegramProvider(
-      providersRaw.telegram,
-      'providers.telegram',
-    );
-    providersOut.telegram = tg;
-    providerGroupMap.set('telegram', new Set(Object.keys(tg.groups)));
-  }
-  // Any provider we don't have a validator for (e.g. 'stdout') passes through
-  // with no group constraint.
-  for (const name of providerNames) {
-    if (!providerGroupMap.has(name)) {
-      providerGroupMap.set(name, null);
-    }
-  }
 
   const sourcesRaw = requireArray(top.sources, 'sources');
   if (sourcesRaw.length === 0) {
@@ -298,13 +260,7 @@ export async function loadConfig(
   const seenNames = new Set<string>();
   const sources: SourceConfig[] = [];
   for (let i = 0; i < sourcesRaw.length; i++) {
-    const src = validateSource(
-      sourcesRaw[i],
-      `sources[${i}]`,
-      providerNames,
-      providerGroupMap,
-      warnings,
-    );
+    const src = validateSource(sourcesRaw[i], `sources[${i}]`, warnings);
     if (seenNames.has(src.name)) {
       throw new Error(
         `Invalid config at sources[${i}].name: duplicate source name "${src.name}"`,
@@ -315,7 +271,7 @@ export async function loadConfig(
   }
 
   return {
-    config: { providers: providersOut, sources },
+    config: { sources },
     warnings,
   };
 }
