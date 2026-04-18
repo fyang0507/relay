@@ -15,8 +15,9 @@
 //     decide whether to re-enable the source.)
 //   - Dispatcher owns 'line' and inbound. See src/dispatch.ts.
 //
-// Provision failures are logged and the file is NOT tracked. Future V2: retry
-// queue with backoff.
+// Provision failures are logged and the file is NOT tracked. Providers own
+// their own transient-error retries (see telegram.provision's 429/5xx backoff
+// for GH #9); a throw here means the provider's retry budget is exhausted.
 
 import fsp from 'node:fs/promises';
 import path from 'node:path';
@@ -316,7 +317,9 @@ export class Relay {
         source,
       );
     } catch (err) {
-      // Loud log; do NOT track. V2: queue for retry with backoff.
+      // Loud log; do NOT track. Providers retry transient errors internally
+      // (e.g. telegram.provision handles 429/5xx with backoff — GH #9); a
+      // throw here means that retry budget was exhausted.
       console.warn(
         `[runtime] provider "${provider.name}".provision failed for ${filePath}: ${(err as Error).message}. File NOT tracked.`,
       );
