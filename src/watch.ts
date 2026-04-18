@@ -2,11 +2,19 @@
 // See relay.md §Architecture and §Startup and backfill behavior.
 //
 // Two layers:
-//  1. Directory watchers: one chokidar watcher per source glob, emits
-//     'fileDiscovered' for each file matching the glob (existing and new).
+//  1. Directory watchers: one chokidar watcher per registered source (keyed by
+//     source name), emits 'fileDiscovered' for each file matching the glob
+//     (existing and new). Sources are added/removed at runtime via
+//     addSource()/removeSource(); there is no static constructor list.
 //  2. File tailers: per tracked file, stream newline-terminated JSON lines
 //     from a starting byte offset, emitting 'line' events with offsets the
 //     core dispatcher can persist as the new durable state.
+//
+// Design note — one chokidar instance per source (keyed by name): chokidar
+// supports multi-glob, but per-source instances make removeSource() trivial
+// (close + drop the entry) and keep the 'add' handler closure free to
+// reference the exact SourceConfig that registered it. The simplicity wins
+// over any theoretical memory saving from sharing an instance.
 
 import { EventEmitter } from 'node:events';
 import fs from 'node:fs';
@@ -33,6 +41,15 @@ interface TailState {
   reading: boolean;   // guard against re-entrant reads on overlapping 'change' events
   changedWhileReading: boolean;
   stopped: boolean;
+}
+
+// Per-source-name directory watcher bookkeeping.
+interface DirWatcherEntry {
+  sourceName: string;
+  watcher: FSWatcher;
+  // Files this directory watcher has discovered and surfaced — used by
+  // removeSource() to untrack every tail it started.
+  discoveredFiles: Set<string>;
 }
 
 // Expand a leading `~` to the user's home directory.
@@ -95,52 +112,87 @@ function globToRegex(pattern: string): RegExp {
 //   'truncated'      (filePath: string)
 //   'error'          (err: Error)
 export class RelayWatcher extends EventEmitter {
-  private sources: SourceConfig[];
-  private dirWatchers: FSWatcher[] = [];
+  // One directory watcher per registered source name.
+  private dirWatchers = new Map<string, DirWatcherEntry>();
   private fileWatchers = new Map<string, FSWatcher>();
   private tails = new Map<string, TailState>();
-  private started = false;
   private stopped = false;
 
-  constructor(sources: SourceConfig[]) {
+  constructor() {
     super();
-    this.sources = sources;
   }
 
+  // Start the watcher lifecycle. Kept as a no-op for symmetry with stop() and
+  // future lifecycle needs (e.g. observability hooks). All real work happens
+  // in addSource().
+  // eslint-disable-next-line @typescript-eslint/require-await
   async start(): Promise<void> {
-    if (this.started) return;
-    this.started = true;
+    // no-op (dynamic watcher — sources register via addSource)
+  }
 
-    for (const source of this.sources) {
-      const { baseDir, pattern } = splitGlob(source.pathGlob);
-      const regex = globToRegex(pattern);
-
-      // Ensure the base directory exists; chokidar silently no-ops on a missing
-      // path, but we still want a deterministic watcher lifecycle.
-      try {
-        await fsp.mkdir(baseDir, { recursive: true });
-      } catch (err) {
-        this.emit('error', err as Error);
-      }
-
-      const watcher = chokidar.watch(baseDir, {
-        ignoreInitial: false,
-        persistent: true,
-        depth: pattern.includes('**') ? undefined : pattern.split(path.sep).length - 1,
-      });
-
-      watcher.on('add', (filePath: string) => {
-        const rel = path.relative(baseDir, filePath);
-        if (!regex.test(rel)) return;
-        this.emit('fileDiscovered', filePath, source.name);
-      });
-
-      watcher.on('error', (err: unknown) => {
-        this.emit('error', err instanceof Error ? err : new Error(String(err)));
-      });
-
-      this.dirWatchers.push(watcher);
+  // Register a directory watcher for `source.pathGlob`, emitting
+  // 'fileDiscovered' events tagged with source.name. Idempotent per source
+  // name: if a watcher for this name already exists, we no-op.
+  async addSource(source: SourceConfig): Promise<void> {
+    if (this.stopped) {
+      throw new Error('RelayWatcher.addSource called after stop()');
     }
+    if (this.dirWatchers.has(source.name)) return;
+
+    const { baseDir, pattern } = splitGlob(source.pathGlob);
+    const regex = globToRegex(pattern);
+
+    // Ensure the base directory exists; chokidar silently no-ops on a missing
+    // path, but we still want a deterministic watcher lifecycle.
+    try {
+      await fsp.mkdir(baseDir, { recursive: true });
+    } catch (err) {
+      this.emit('error', err as Error);
+    }
+
+    const watcher = chokidar.watch(baseDir, {
+      ignoreInitial: false,
+      persistent: true,
+      depth: pattern.includes('**') ? undefined : pattern.split(path.sep).length - 1,
+    });
+
+    const entry: DirWatcherEntry = {
+      sourceName: source.name,
+      watcher,
+      discoveredFiles: new Set<string>(),
+    };
+
+    watcher.on('add', (filePath: string) => {
+      const rel = path.relative(baseDir, filePath);
+      if (!regex.test(rel)) return;
+      entry.discoveredFiles.add(filePath);
+      this.emit('fileDiscovered', filePath, source.name);
+    });
+
+    watcher.on('error', (err: unknown) => {
+      this.emit('error', err instanceof Error ? err : new Error(String(err)));
+    });
+
+    this.dirWatchers.set(source.name, entry);
+  }
+
+  // Stop that source's directory watcher AND untrack every tail we started
+  // under it. Idempotent: if the source isn't registered, no-op.
+  async removeSource(sourceName: string): Promise<void> {
+    const entry = this.dirWatchers.get(sourceName);
+    if (!entry) return;
+    this.dirWatchers.delete(sourceName);
+
+    // Untrack every tail that came from this directory watcher. We also
+    // defensively catch files currently tracked with this sourceName — they
+    // may have been added through a prior addSource that got replaced.
+    const toUntrack = new Set<string>(entry.discoveredFiles);
+    for (const [filePath, tail] of this.tails) {
+      if (tail.sourceName === sourceName) toUntrack.add(filePath);
+    }
+    for (const fp of toUntrack) this.untrackFile(fp);
+
+    await entry.watcher.close();
   }
 
   trackFile(filePath: string, startOffset: number, sourceName: string): void {
@@ -188,9 +240,9 @@ export class RelayWatcher extends EventEmitter {
     if (this.stopped) return;
     this.stopped = true;
     const closers: Promise<void>[] = [];
-    for (const w of this.dirWatchers) closers.push(w.close());
+    for (const entry of this.dirWatchers.values()) closers.push(entry.watcher.close());
     for (const w of this.fileWatchers.values()) closers.push(w.close());
-    this.dirWatchers = [];
+    this.dirWatchers.clear();
     this.fileWatchers.clear();
     for (const state of this.tails.values()) state.stopped = true;
     this.tails.clear();

@@ -1,12 +1,11 @@
 // Tests for RelayWatcher. See src/watch.ts and relay.md §Architecture.
 //
-// Covers directory discovery (both pre-existing and newly-added files), line
-// tailing from a byte offset, append handling, malformed-JSON resilience, and
-// the V2-boundary truncation signal.
+// Covers dynamic directory registration (addSource / removeSource), line
+// tailing from a byte offset, append handling, malformed-JSON resilience,
+// and the V2-boundary truncation signal.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -29,39 +28,40 @@ function makeSource(dir: string, name = 'test-src'): SourceConfig {
     name,
     pathGlob: path.join(dir, '*.jsonl'),
     provider: 'dryrun',
-    group: 'grp',
     inboundTypes: [],
     tiers: {},
   };
 }
 
-test('discovers pre-existing file in glob on start', async (t) => {
+test('addSource discovers pre-existing file in glob', async (t) => {
   const dir = await makeTmpDir('pre');
   t.after(() => fsp.rm(dir, { recursive: true, force: true }));
 
   const filePath = path.join(dir, 'a.jsonl');
   await fsp.writeFile(filePath, '');
 
-  const watcher = new RelayWatcher([makeSource(dir)]);
+  const watcher = new RelayWatcher();
   const discovered: string[] = [];
   watcher.on('fileDiscovered', (fp: string) => discovered.push(fp));
 
   await watcher.start();
+  await watcher.addSource(makeSource(dir));
   await delay(SETTLE_MS);
 
   assert.deepEqual(discovered, [filePath]);
   await watcher.stop();
 });
 
-test('discovers new file added after start', async (t) => {
+test('addSource discovers new file added after registration', async (t) => {
   const dir = await makeTmpDir('new');
   t.after(() => fsp.rm(dir, { recursive: true, force: true }));
 
-  const watcher = new RelayWatcher([makeSource(dir)]);
+  const watcher = new RelayWatcher();
   const discovered: string[] = [];
   watcher.on('fileDiscovered', (fp: string) => discovered.push(fp));
 
   await watcher.start();
+  await watcher.addSource(makeSource(dir));
   await delay(SETTLE_MS);
 
   const newFile = path.join(dir, 'b.jsonl');
@@ -79,11 +79,12 @@ test('ignores non-matching files in watch dir', async (t) => {
   await fsp.writeFile(path.join(dir, 'note.txt'), 'hello');
   await fsp.writeFile(path.join(dir, 'c.jsonl'), '');
 
-  const watcher = new RelayWatcher([makeSource(dir)]);
+  const watcher = new RelayWatcher();
   const discovered: string[] = [];
   watcher.on('fileDiscovered', (fp: string) => discovered.push(fp));
 
   await watcher.start();
+  await watcher.addSource(makeSource(dir));
   await delay(SETTLE_MS);
 
   assert.deepEqual(discovered, [path.join(dir, 'c.jsonl')]);
@@ -99,11 +100,12 @@ test('tails two pre-existing lines from offset 0', async (t) => {
   const l2 = JSON.stringify({ type: 'call.completed', timestamp: 't2', id: 2 });
   await fsp.writeFile(filePath, l1 + '\n' + l2 + '\n');
 
-  const watcher = new RelayWatcher([makeSource(dir)]);
+  const watcher = new RelayWatcher();
   const lines: LineEvent[] = [];
   watcher.on('line', (ev: LineEvent) => lines.push(ev));
 
   await watcher.start();
+  await watcher.addSource(makeSource(dir));
   watcher.trackFile(filePath, 0, 'test-src');
   await delay(SETTLE_MS);
 
@@ -128,11 +130,12 @@ test('emits line event for appended line after tracking', async (t) => {
   const l2 = JSON.stringify({ type: 'b', timestamp: 't2' });
   await fsp.writeFile(filePath, l1 + '\n' + l2 + '\n');
 
-  const watcher = new RelayWatcher([makeSource(dir)]);
+  const watcher = new RelayWatcher();
   const lines: LineEvent[] = [];
   watcher.on('line', (ev: LineEvent) => lines.push(ev));
 
   await watcher.start();
+  await watcher.addSource(makeSource(dir));
   watcher.trackFile(filePath, 0, 'test-src');
   await delay(SETTLE_MS);
   assert.equal(lines.length, 2);
@@ -157,13 +160,14 @@ test('malformed JSON yields parsed: null but still emits line', async (t) => {
   const bad = '{not valid json';
   await fsp.writeFile(filePath, good + '\n' + bad + '\n');
 
-  const watcher = new RelayWatcher([makeSource(dir)]);
+  const watcher = new RelayWatcher();
   const lines: LineEvent[] = [];
   const errors: Error[] = [];
   watcher.on('line', (ev: LineEvent) => lines.push(ev));
   watcher.on('error', (err: Error) => errors.push(err));
 
   await watcher.start();
+  await watcher.addSource(makeSource(dir));
   watcher.trackFile(filePath, 0, 'test-src');
   await delay(SETTLE_MS);
 
@@ -185,13 +189,14 @@ test('truncation emits truncated event and halts tailing', async (t) => {
   const l2 = JSON.stringify({ type: 'b', timestamp: 't2' });
   await fsp.writeFile(filePath, l1 + '\n' + l2 + '\n');
 
-  const watcher = new RelayWatcher([makeSource(dir)]);
+  const watcher = new RelayWatcher();
   const lines: LineEvent[] = [];
   const truncated: string[] = [];
   watcher.on('line', (ev: LineEvent) => lines.push(ev));
   watcher.on('truncated', (fp: string) => truncated.push(fp));
 
   await watcher.start();
+  await watcher.addSource(makeSource(dir));
   watcher.trackFile(filePath, 0, 'test-src');
   await delay(SETTLE_MS);
   assert.equal(lines.length, 2);
@@ -210,4 +215,88 @@ test('truncation emits truncated event and halts tailing', async (t) => {
   assert.equal(lines.length, priorLineCount);
 
   await watcher.stop();
+});
+
+test('removeSource stops discovery for that source and untracks its tails', async (t) => {
+  const dir = await makeTmpDir('remove-src');
+  t.after(() => fsp.rm(dir, { recursive: true, force: true }));
+
+  const filePath = path.join(dir, 'a.jsonl');
+  await fsp.writeFile(filePath, '');
+
+  const watcher = new RelayWatcher();
+  const discovered: string[] = [];
+  const lines: LineEvent[] = [];
+  watcher.on('fileDiscovered', (fp: string) => discovered.push(fp));
+  watcher.on('line', (ev: LineEvent) => lines.push(ev));
+
+  const source = makeSource(dir, 'remove-me');
+  await watcher.start();
+  await watcher.addSource(source);
+  await delay(SETTLE_MS);
+  assert.deepEqual(discovered, [filePath]);
+
+  watcher.trackFile(filePath, 0, source.name);
+
+  // Append one line; the watcher should pick it up.
+  const l1 = JSON.stringify({ type: 'a', timestamp: 't1' });
+  await fsp.appendFile(filePath, l1 + '\n');
+  await delay(SETTLE_MS);
+  assert.equal(lines.length, 1);
+
+  // Now remove the source. The directory watcher closes, and the previously
+  // tracked file is untracked.
+  await watcher.removeSource(source.name);
+
+  // Subsequent appends must NOT emit new line events.
+  const priorCount = lines.length;
+  const l2 = JSON.stringify({ type: 'b', timestamp: 't2' });
+  await fsp.appendFile(filePath, l2 + '\n');
+  await delay(SETTLE_MS);
+  assert.equal(lines.length, priorCount, 'no more lines after removeSource');
+
+  // And a brand-new file in the directory must NOT trigger discovery.
+  const priorDiscovered = discovered.length;
+  const newFile = path.join(dir, 'b.jsonl');
+  await fsp.writeFile(newFile, '');
+  await delay(SETTLE_MS);
+  assert.equal(discovered.length, priorDiscovered, 'no more discoveries after removeSource');
+
+  await watcher.stop();
+});
+
+test('addSource is idempotent per source name', async (t) => {
+  const dir = await makeTmpDir('idempotent');
+  t.after(() => fsp.rm(dir, { recursive: true, force: true }));
+
+  const filePath = path.join(dir, 'a.jsonl');
+  await fsp.writeFile(filePath, '');
+
+  const watcher = new RelayWatcher();
+  const discovered: string[] = [];
+  watcher.on('fileDiscovered', (fp: string) => discovered.push(fp));
+
+  await watcher.start();
+  const source = makeSource(dir, 'dup-src');
+  await watcher.addSource(source);
+  await watcher.addSource(source); // second call should be a no-op
+  await delay(SETTLE_MS);
+
+  // Only one discovery event for the pre-existing file.
+  assert.equal(
+    discovered.filter((d) => d === filePath).length,
+    1,
+    `expected exactly one discovery of ${filePath}, saw ${JSON.stringify(discovered)}`,
+  );
+  await watcher.stop();
+});
+
+test('removeSource on unknown name is a no-op', async (t) => {
+  const dir = await makeTmpDir('remove-unknown');
+  t.after(() => fsp.rm(dir, { recursive: true, force: true }));
+  const watcher = new RelayWatcher();
+  await watcher.start();
+  await watcher.removeSource('never-registered');
+  await watcher.stop();
+  assert.ok(true);
 });

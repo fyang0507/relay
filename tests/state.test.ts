@@ -6,7 +6,12 @@ import { promises as fs } from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
 
-import { RelayState, type SourceState } from '../src/state.ts';
+import {
+  RelayState,
+  type RegistryEntry,
+  type SourceState,
+} from '../src/state.ts';
+import type { SourceConfig } from '../src/types.ts';
 
 async function mkTmpStatePath(label: string): Promise<string> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), `relay-state-${label}-`));
@@ -16,9 +21,35 @@ async function mkTmpStatePath(label: string): Promise<string> {
 function makeSourceState(overrides: Partial<SourceState> = {}): SourceState {
   return {
     sourceName: 'outreach-campaigns',
+    relayId: 'rl_aaaaaa',
     offset: 0,
     destination: { chatId: -100123, topicId: 7 },
     destinationKey: '-100123:7',
+    ...overrides,
+  };
+}
+
+function makeSourceConfig(overrides: Partial<SourceConfig> = {}): SourceConfig {
+  return {
+    name: 'outreach-campaigns',
+    pathGlob: '/tmp/outreach/*.jsonl',
+    provider: 'telegram',
+    groupId: -1003975893613,
+    inboundTypes: ['human_input'],
+    tiers: {},
+    ...overrides,
+  };
+}
+
+function makeRegistryEntry(
+  id: string,
+  overrides: Partial<RegistryEntry> = {},
+): RegistryEntry {
+  return {
+    id,
+    configPath: '/etc/relay/relay.config.yaml',
+    sourceConfig: makeSourceConfig(),
+    addedAt: '2026-04-17T00:00:00.000Z',
     ...overrides,
   };
 }
@@ -27,15 +58,36 @@ test('load returns fresh state when file is missing', async () => {
   const p = await mkTmpStatePath('missing');
   const s = await RelayState.load(p);
   const snap = s._snapshot();
-  assert.equal(snap.version, 1);
+  assert.equal(snap.version, 2);
   assert.deepEqual(snap.sources, {});
   assert.deepEqual(snap.providers, {});
+  assert.deepEqual(snap.registry, {});
 
   // File should NOT have been created by load.
   await assert.rejects(fs.stat(p), (err: NodeJS.ErrnoException) => err.code === 'ENOENT');
 });
 
-test('save + load round-trips state shape', async () => {
+test('load rejects a v1 state file with a clear message', async () => {
+  const p = await mkTmpStatePath('v1-rejected');
+  await fs.mkdir(path.dirname(p), { recursive: true });
+  await fs.writeFile(
+    p,
+    JSON.stringify({ version: 1, sources: {}, providers: {} }),
+  );
+  await assert.rejects(
+    () => RelayState.load(p),
+    /is v1; this relay requires v2. Remove the file and re-register sources\./,
+  );
+});
+
+test('load rejects a state file with unknown version', async () => {
+  const p = await mkTmpStatePath('vx-rejected');
+  await fs.mkdir(path.dirname(p), { recursive: true });
+  await fs.writeFile(p, JSON.stringify({ version: 99, sources: {} }));
+  await assert.rejects(() => RelayState.load(p), /requires v2/);
+});
+
+test('save + load round-trips state shape (v2)', async () => {
   const p = await mkTmpStatePath('roundtrip');
   const s1 = await RelayState.load(p);
 
@@ -46,14 +98,19 @@ test('save + load round-trips state shape', async () => {
   tgBag.telegramUpdateIdCursor = 987654;
   tgBag.extra = 'hello';
 
+  const entry = makeRegistryEntry('rl_bbbbbb');
+  s1.addRegistry(entry);
+
   await s1.flush();
 
   const s2 = await RelayState.load(p);
   const snap = s2._snapshot();
-  assert.equal(snap.version, 1);
+  assert.equal(snap.version, 2);
   assert.deepEqual(snap.sources['/abs/path/to/file.jsonl'], src);
   assert.equal(snap.providers.telegram?.telegramUpdateIdCursor, 987654);
   assert.equal(snap.providers.telegram?.extra, 'hello');
+  assert.ok(snap.registry['rl_bbbbbb']);
+  assert.equal(snap.registry['rl_bbbbbb'].sourceConfig.name, 'outreach-campaigns');
 });
 
 test('setSource + findSourceByDestinationKey', async () => {
@@ -141,7 +198,7 @@ test('concurrent saves serialize without corrupting the file', async () => {
   // File must parse as valid JSON and contain the final state.
   const raw = await fs.readFile(p, 'utf8');
   const parsed = JSON.parse(raw);
-  assert.equal(parsed.version, 1);
+  assert.equal(parsed.version, 2);
   for (let i = 0; i < 20; i++) {
     assert.equal(parsed.sources[`/files/f${i}.jsonl`].offset, i);
   }
@@ -169,4 +226,93 @@ test('load expands ~ in path', async () => {
   const p = await mkTmpStatePath('tilde');
   const s = await RelayState.load(p);
   assert.ok(s instanceof RelayState);
+});
+
+// ---- v2 registry --------------------------------------------------------
+
+test('addRegistry + listRegistry + getRegistry round-trip', async () => {
+  const p = await mkTmpStatePath('registry-basic');
+  const s = await RelayState.load(p);
+  const e1 = makeRegistryEntry('rl_111111', {
+    sourceConfig: makeSourceConfig({ name: 'alpha' }),
+  });
+  const e2 = makeRegistryEntry('rl_222222', {
+    sourceConfig: makeSourceConfig({ name: 'beta' }),
+    configPath: '/other/config.yaml',
+  });
+  s.addRegistry(e1);
+  s.addRegistry(e2);
+
+  const list = s.listRegistry();
+  assert.equal(list.length, 2);
+  const names = list.map((e) => e.sourceConfig.name).sort();
+  assert.deepEqual(names, ['alpha', 'beta']);
+
+  const got = s.getRegistry('rl_111111');
+  assert.ok(got);
+  assert.equal(got.sourceConfig.name, 'alpha');
+
+  // listRegistry returns copies — mutating them must not affect storage.
+  list[0].configPath = 'MUTATED';
+  assert.notEqual(s.getRegistry(list[0].id)?.configPath, 'MUTATED');
+
+  await s.flush();
+});
+
+test('removeRegistry cascades: drops sources with matching relayId', async () => {
+  const p = await mkTmpStatePath('registry-cascade');
+  const s = await RelayState.load(p);
+
+  const idA = 'rl_aaaaaa';
+  const idB = 'rl_bbbbbb';
+  s.addRegistry(makeRegistryEntry(idA));
+  s.addRegistry(makeRegistryEntry(idB, {
+    sourceConfig: makeSourceConfig({ name: 'other' }),
+  }));
+  // Two files under A, one under B.
+  s.setSource('/a/1.jsonl', makeSourceState({ relayId: idA }));
+  s.setSource('/a/2.jsonl', makeSourceState({ relayId: idA, destinationKey: 'k2' }));
+  s.setSource('/b/1.jsonl', makeSourceState({ relayId: idB, destinationKey: 'k3' }));
+
+  const removed = s.removeRegistry(idA);
+  assert.ok(removed);
+  assert.equal(removed.id, idA);
+
+  // Registry A gone, registry B remains.
+  assert.equal(s.getRegistry(idA), undefined);
+  assert.ok(s.getRegistry(idB));
+
+  // Both /a files gone; /b file remains.
+  assert.equal(s.getSource('/a/1.jsonl'), undefined);
+  assert.equal(s.getSource('/a/2.jsonl'), undefined);
+  assert.ok(s.getSource('/b/1.jsonl'));
+
+  await s.flush();
+});
+
+test('removeRegistry returns undefined when id is unknown', async () => {
+  const p = await mkTmpStatePath('registry-noop');
+  const s = await RelayState.load(p);
+  assert.equal(s.removeRegistry('rl_nope00'), undefined);
+  await s.flush();
+});
+
+test('generateRelayId returns rl_ + 6 hex chars and avoids live collisions', async () => {
+  const p = await mkTmpStatePath('idgen');
+  const s = await RelayState.load(p);
+
+  const id = s.generateRelayId();
+  assert.match(id, /^rl_[0-9a-f]{6}$/);
+
+  // Generate many ids, ensuring uniqueness across a batch. We register each
+  // one so the retry logic on collision is actually exercised.
+  const seen = new Set<string>();
+  for (let i = 0; i < 200; i++) {
+    const next = s.generateRelayId();
+    assert.match(next, /^rl_[0-9a-f]{6}$/);
+    assert.ok(!seen.has(next), `duplicate id ${next}`);
+    seen.add(next);
+    s.addRegistry(makeRegistryEntry(next));
+  }
+  await s.flush();
 });

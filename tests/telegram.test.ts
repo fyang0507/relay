@@ -9,6 +9,19 @@ import type {
   TelegramDestination,
   TelegramProviderOptions,
 } from '../src/providers/telegram.ts';
+import type { SourceConfig } from '../src/types.ts';
+
+function makeSource(overrides: Partial<SourceConfig> = {}): SourceConfig {
+  return {
+    name: 'outreach-campaigns',
+    pathGlob: '/tmp/*.jsonl',
+    provider: 'telegram',
+    groupId: -100123,
+    inboundTypes: ['human_input'],
+    tiers: {},
+    ...overrides,
+  };
+}
 
 type FetchArgs = { url: string; init: RequestInit; body: unknown };
 
@@ -44,11 +57,12 @@ function jsonResponse(body: unknown, init?: ResponseInit): Response {
 }
 
 // A tiny harness to spin up the provider with pluggable cursor storage.
+// Phase 2: no `groups` map anymore — destination chat id comes from
+// `SourceConfig.groupId` passed into `provision()`.
 function makeProvider(overrides: Partial<TelegramProviderOptions> = {}) {
   let cursor: number | undefined;
   const opts: TelegramProviderOptions = {
     botToken: 'TEST',
-    groups: { outreach: -100123, smart_home: -100456 },
     getUpdateIdCursor: () => cursor,
     setUpdateIdCursor: (n) => {
       cursor = n;
@@ -193,19 +207,21 @@ describe('TelegramProvider', () => {
   });
 
   describe('provision', () => {
-    it('uses meta.filenameStem verbatim (no sourceName prefix) as the topic name', async () => {
+    it('reads groupId from sourceConfig and uses meta.filenameStem as topic name', async () => {
       const { fn, calls } = makeFetchStub([
         () => jsonResponse({ ok: true, result: { message_thread_id: 99, name: 'x' } }),
       ]);
       globalThis.fetch = fn as typeof fetch;
 
       const { provider } = makeProvider();
-      const dest = (await provider.provision({
-        sourceName: 'outreach-campaigns',
-        filenameStem: '2026-04-15-dental',
-        filePath: '/tmp/x.jsonl',
-        providerGroup: 'outreach',
-      })) as TelegramDestination;
+      const dest = (await provider.provision(
+        {
+          sourceName: 'outreach-campaigns',
+          filenameStem: '2026-04-15-dental',
+          filePath: '/tmp/x.jsonl',
+        },
+        makeSource({ groupId: -100123 }),
+      )) as TelegramDestination;
 
       assert.deepEqual(dest, { groupId: -100123, threadId: 99 });
       assert.equal(calls.length, 1);
@@ -224,43 +240,54 @@ describe('TelegramProvider', () => {
 
       const { provider } = makeProvider();
       const longStem = 'a'.repeat(200);
-      await provider.provision({
-        sourceName: 'outreach-campaigns',
-        filenameStem: longStem,
-        filePath: '/tmp/x.jsonl',
-        providerGroup: 'outreach',
-      });
+      await provider.provision(
+        {
+          sourceName: 'outreach-campaigns',
+          filenameStem: longStem,
+          filePath: '/tmp/x.jsonl',
+        },
+        makeSource({ groupId: -100123 }),
+      );
       const body = calls[0]!.body as Record<string, unknown>;
       const name = body.name as string;
       assert.equal(name.length, 128);
       assert.equal(name, 'a'.repeat(128));
     });
 
-    it('throws when providerGroup is missing', async () => {
+    it('throws when sourceConfig.groupId is missing', async () => {
       const { provider } = makeProvider();
       await assert.rejects(
         () =>
-          provider.provision({
-            sourceName: 's',
-            filenameStem: 'f',
-            filePath: '/tmp/f.jsonl',
-          }),
-        /providerGroup is required/,
+          provider.provision(
+            {
+              sourceName: 's',
+              filenameStem: 'f',
+              filePath: '/tmp/f.jsonl',
+            },
+            makeSource({ groupId: undefined }),
+          ),
+        /sourceConfig\.groupId is required/,
       );
     });
 
-    it('throws when providerGroup is not in the configured groups map', async () => {
+    it('different sources address different groups via sourceConfig.groupId', async () => {
+      const { fn, calls } = makeFetchStub([
+        () => jsonResponse({ ok: true, result: { message_thread_id: 1, name: 'x' } }),
+        () => jsonResponse({ ok: true, result: { message_thread_id: 2, name: 'y' } }),
+      ]);
+      globalThis.fetch = fn as typeof fetch;
+
       const { provider } = makeProvider();
-      await assert.rejects(
-        () =>
-          provider.provision({
-            sourceName: 's',
-            filenameStem: 'f',
-            filePath: '/tmp/f.jsonl',
-            providerGroup: 'nope',
-          }),
-        /unknown provider group "nope"/,
+      await provider.provision(
+        { sourceName: 'a', filenameStem: 'a', filePath: '/tmp/a.jsonl' },
+        makeSource({ name: 'a', groupId: -100111 }),
       );
+      await provider.provision(
+        { sourceName: 'b', filenameStem: 'b', filePath: '/tmp/b.jsonl' },
+        makeSource({ name: 'b', groupId: -100222 }),
+      );
+      assert.equal((calls[0]!.body as Record<string, unknown>).chat_id, -100111);
+      assert.equal((calls[1]!.body as Record<string, unknown>).chat_id, -100222);
     });
   });
 
@@ -377,7 +404,6 @@ describe('TelegramProvider', () => {
       let cursor: number | undefined = undefined;
       const provider = new TelegramProvider({
         botToken: 'TEST',
-        groups: { outreach: -100123 },
         getUpdateIdCursor: () => cursor,
         setUpdateIdCursor: (n) => {
           cursor = n;

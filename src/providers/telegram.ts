@@ -3,7 +3,7 @@
 //
 // See relay.md §Provider contract and §Viewer-side reconciliation.
 
-import type { SourceMetadata, Tier } from '../types.js';
+import type { SourceConfig, SourceMetadata, Tier } from '../types.js';
 import type {
   Destination,
   DeliverResult,
@@ -42,9 +42,12 @@ export interface TelegramDestination extends Record<string, unknown> {
 // Constructor dependencies. The update_id cursor is read/written via callbacks
 // so state persistence stays in `state.ts` and this class stays side-effect-free
 // w.r.t. disk I/O.
+//
+// Phase 2: no `groups` name→id map anymore. The destination chat id comes
+// from the `SourceConfig.groupId` passed into `provision()` alongside the
+// `SourceMetadata` — credentials and config are now fully separated.
 export interface TelegramProviderOptions {
   botToken: string;
-  groups: Record<string, number>;
   getUpdateIdCursor: () => number | undefined;
   setUpdateIdCursor: (n: number) => void;
 }
@@ -90,7 +93,6 @@ export class TelegramProvider implements Provider {
   public readonly name = 'telegram';
 
   private readonly botToken: string;
-  private readonly groups: Record<string, number>;
   private readonly getUpdateIdCursor: () => number | undefined;
   private readonly setUpdateIdCursor: (n: number) => void;
 
@@ -102,7 +104,6 @@ export class TelegramProvider implements Provider {
 
   constructor(opts: TelegramProviderOptions) {
     this.botToken = opts.botToken;
-    this.groups = opts.groups;
     this.getUpdateIdCursor = opts.getUpdateIdCursor;
     this.setUpdateIdCursor = opts.setUpdateIdCursor;
   }
@@ -112,17 +113,21 @@ export class TelegramProvider implements Provider {
     return `${td.groupId}:${td.threadId}`;
   }
 
-  async provision(meta: SourceMetadata): Promise<Destination> {
-    const groupName = meta.providerGroup;
-    if (!groupName) {
-      throw new Error(
-        `telegram.provision: SourceMetadata.providerGroup is required (source=${meta.sourceName})`,
-      );
-    }
-    const groupId = this.groups[groupName];
+  // Phase 2: `provision` now takes the full `SourceConfig` as a second arg,
+  // which carries the per-source `groupId` (raw chat id). We pass the whole
+  // config instead of copying the one field onto `SourceMetadata` because
+  // (a) the caller already has the config in hand, so there's no new
+  // plumbing, and (b) this leaves the door open for future providers to
+  // read additional source-scoped fields at provision time without another
+  // round of type surgery.
+  async provision(
+    meta: SourceMetadata,
+    sourceConfig: SourceConfig,
+  ): Promise<Destination> {
+    const groupId = sourceConfig.groupId;
     if (groupId === undefined) {
       throw new Error(
-        `telegram.provision: unknown provider group "${groupName}" (source=${meta.sourceName}). Configured groups: ${Object.keys(this.groups).join(', ') || '<none>'}`,
+        `telegram.provision: sourceConfig.groupId is required (source=${meta.sourceName})`,
       );
     }
     // Topic name is always the file's stem. Developers who want a custom

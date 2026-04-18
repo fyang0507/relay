@@ -1,7 +1,7 @@
 # Relay — Agent-to-Human Observability Layer
 
-Issue: #67 (outreach-side integration, blocked on relay being built)
-Status: Design. Relay will be a separate project; this plan lives in outreach docs until relay is scaffolded, at which point it moves to the relay repo.
+Issue: #67 (outreach-side integration)
+Status: v0.1.0 shipped. This doc is the living design reference — where the code and the doc disagree, the code wins and the doc gets updated. See the "v0.1.0 delivered" note under *Implementation phases* for what's actually in the codebase today.
 
 ## Problem
 
@@ -33,12 +33,14 @@ Relay is a standalone project consumed by outreach and other agent surfaces as p
        └────────────────────┴────────────────────┘
                             │
                             ▼
-              ┌────────────────────────────┐
-              │        relay-core          │
-              │  • directory watchers      │
-              │  • file watchers           │
-              │  • offset state store      │
-              │  • source→destination map  │
+              ┌────────────────────────────┐        ┌──────────────┐
+              │   relayd (daemon,          │◀──RPC──│  relay CLI   │
+              │   supervised by launchd)   │  unix  │  (init, add, │
+              │  • directory watchers      │  sock  │   list,      │
+              │  • file watchers           │        │   remove,    │
+              │  • offset state store      │        │   health,    │
+              │  • dynamic source registry │        │   shutdown)  │
+              │  • source→destination map  │        └──────────────┘
               │  • type → tier policy      │
               └────────────┬───────────────┘
                            │
@@ -57,12 +59,16 @@ Relay is a standalone project consumed by outreach and other agent surfaces as p
     └──────────────┘
 ```
 
-**relay-core** owns:
-- File-system watchers (one directory watcher per configured source glob, one file watcher per active mapped file)
-- Per-file offset state (last byte or line offset published, persisted to disk)
-- Source → destination registry (which source file maps to which provider destination)
+The daemon (`relayd`) listens on `~/.relay/sock`. The CLI (`relay`) is a thin socket client for everything except `init` and `shutdown`, which install and remove the launchd plist. Source configs are registered at runtime via `add`; the daemon persists them in a `registry` section of `~/.relay/state.json` and replays them on restart.
+
+**relay-core** (`relayd` daemon) owns:
+- File-system watchers (one directory watcher per registered source glob, one file watcher per active mapped file)
+- Per-file offset state (last byte offset published, persisted to `~/.relay/state.json`)
+- Dynamic source registry (runtime-added source configs keyed by `rl_xxxxxx` ids; survives restart)
+- Source → destination mapping (which source file maps to which provider destination)
 - Type → tier policy (config-driven, not agent-emitted)
 - Inbound dispatch (reply arrived on destination X → append to file mapped from destination X)
+- Unix-socket RPC surface (`list`, `add`, `remove`, `health`) for the CLI to mutate the registry without restarting
 
 **Providers** implement a four-primitive interface (see next section). Telegram is the V1 provider. Additional providers slot in as peers without changing relay-core.
 
@@ -85,21 +91,15 @@ Deliberately excluded (platform-idiomatic, deferred to per-provider extensions p
 
 ## Configuration schema
 
-```yaml
-# relay.config.yaml
-providers:
-  telegram:
-    bot_token: ${TELEGRAM_BOT_TOKEN}
-    # group IDs are named so sources can reference them
-    groups:
-      outreach: -100xxxxxxxxxx
-      smart_home: -100yyyyyyyyyy
+Project configs are credential-free and project-portable: each consumer keeps its own `relay.config.yaml` declaring only its sources, and registers it via `relay add --config <path>`. Bot tokens live in the relay repo's own `.env` (read by `src/credentials.ts` as `TELEGRAM_BOT_API_TOKEN`), not in the project config.
 
+```yaml
+# relay.config.yaml (lives in the consumer's repo)
 sources:
   - name: outreach-campaigns
     path_glob: ~/outreach-data/outreach/campaigns/*.jsonl
     provider: telegram
-    group: outreach
+    group_id: -1001234567890               # Telegram supergroup chat id (negative, starts with -100)
     inbound_types: [human_input]           # loop prevention: relay writes these, don't re-publish
     tiers:
       call.placed: silent
@@ -114,14 +114,14 @@ sources:
   - name: smart-home-runs
     path_glob: ~/smart-home/runs/*.jsonl
     provider: telegram
-    group: smart_home
-    inbound_types: []
+    group_id: -1009876543210
+    inbound_types: [human_input]
     tiers:
       task.ran: silent
       task.failed: notify
 ```
 
-Relay's config is the human's control surface — tier policy, destinations, and provider credentials all live here. Consumers (outreach, smart-home) stay tier-unaware; they just emit well-typed JSONL.
+Tier policy and destination are the human's control surface; consumers (outreach, smart-home) stay tier-unaware and just emit well-typed JSONL. Credentials stay on the operator's machine.
 
 ## Data contract
 
@@ -141,20 +141,24 @@ Relay ships a `SKILL.md` documenting this contract so consumers know what to emi
 
 ## Startup and backfill behavior
 
-On relay start:
+On daemon start (launchd brings `relayd` up automatically; the flow below is identical whether via `relay init` or a fresh login):
 
-1. Load config, connect providers.
-2. For each source, scan `path_glob` for existing files.
-3. For each existing file, look up in state:
-   - **Mapped already** → resume file watcher from stored offset. No backfill.
-   - **Not mapped** → decision point: backfill from offset 0 (create new topic, publish all history) or mark-as-read (create topic, skip to end).
+1. Load state (`~/.relay/state.json`, schema v2) and credentials (relay repo `.env`).
+2. Build the provider map. Stdout is always available; Telegram registers iff credentials are present.
+3. Start the dispatcher (inbound loops go live) and the base watcher.
+4. **Replay the registry**: for each persisted `registry` entry, re-attach its source to the watcher. Pre-existing files are rediscovered and, if already tracked in state, resumed from the stored offset.
+5. Start the socket server on `~/.relay/sock` so the CLI can issue `list` / `add` / `remove` / `health`.
 
-Default behavior on first discovery: **create topic, skip to EOF** (treat existing history as "already happened" — user can always read the file). Optional `--backfill` flag or per-source `backfill: true` to replay history.
+For each discovered file, the runtime decides:
 
-Telegram inbound cursor (`update_id`) persists separately so relay never reprocesses old replies on restart.
+- **Mapped already** → resume file watcher from stored offset. No backfill.
+- **Not mapped** → provision a fresh destination (e.g. create a Telegram forum topic), decide starting offset.
 
-4. Start inbound listener (Telegram `getUpdates` long-poll).
-5. Start directory watcher on each source glob for new files (→ provision destination, start file watcher).
+Default offset on first discovery: **create topic, skip to EOF** (treat existing history as "already happened" — the user can always read the file). Per-source `backfill: true` in the YAML, or the daemon-wide `options.backfill` flag, replays from offset 0.
+
+Telegram inbound cursor (`update_id`) persists separately in the provider bag so relay never reprocesses old replies on restart.
+
+When an operator runs `relay add --config ...`, each source in that config goes through the same discovery path without a daemon restart. `relay remove --id rl_xxx` detaches the directory watcher, untracks tailing, drops the registry entry, and cascades to every `sources[filePath]` whose `relayId` matches.
 
 ## Viewer-side reconciliation
 
@@ -172,42 +176,32 @@ Telegram-specific early-detection (`forum_topic_closed` etc.) is an *optimizatio
 
 ## Deferred / V2 scope
 
-Not in V1; flagged so the core design stays compatible:
+Not in v0.1.0; flagged so the core design stays compatible:
 
+- **Transient-failure retry queue.** Today, if `provider.deliver` throws a transient error (network blip, Telegram 5xx), the offset does not advance and the line only redelivers on the next file append. A source that stops appending is stranded. V2: in-memory retry queue with exponential backoff, persisted across restarts. See the TODO in `src/dispatch.ts`.
 - **Slash commands as a steering primitive** (`/pause`, `/halt`, `/status`) → would map to `{type: "user_command", ...}` entries written to the source file, parallel to how `human_input` works today. Same mechanism, new inbound type. Platform-specific (Telegram and Slack have them; iMessage and email don't), so per-provider.
 - **Additional providers** (Slack, iMessage, email). The four-primitive interface is designed for this; no relay-core changes needed.
+- **Linux/systemd supervision.** Current lifecycle commands shell out to `launchctl` and are macOS-only.
 - **File rotation / truncation handling.** Outreach JSONL is append-only, so not a concern today. If a future consumer rotates files, offset-based state needs a "file identity" concept (inode or content hash).
 - **Multi-observer access control.** Today's design assumes one viewer (the configured group). Read-only observers would be a Telegram group-permissions concern, not relay logic.
-- **Rich rendering templates.** V1 ships a default JSON-pretty-print renderer. Per-type message templates (markdown, inline keyboards for quick-reply) are a provider-side polish pass.
+- **Rich rendering templates.** v0.1.0 ships a default JSON-pretty-print renderer. Per-type message templates (markdown, inline keyboards for quick-reply) are a provider-side polish pass.
+- **Deep `relay health` probe.** Today's `health` is a liveness RPC only. A deep probe (bot token, group reachability, writable state dir, globs resolving) belongs server-side; see open question #4.
 
 ## Implementation phases
 
-### Phase 1 — relay-core + provider interface
+### v0.1.0 delivered
 
-- Scaffold project (TypeScript, ESM, Node 20+; match outreach conventions).
-- Define provider interface (`deliver`, `receive`, `provision`).
-- File-system watcher layer (chokidar): directory-level glob watcher + per-file offset-tracking line reader.
-- Offset state store (single JSON file, `~/.relay/state.json`).
-- Source-to-destination registry in-memory, persisted in state.
-- Core dispatch: new line → look up tier → provider.deliver; inbound event → look up source file → append line.
-- Dry-run / stdout provider for local testing without Telegram.
+Phases 1–3 of the original plan shipped; the CLI/daemon split was reworked to drop static config in favor of a dynamic runtime registry. What's in the codebase today:
 
-### Phase 2 — config schema + startup behavior
-
-- Load `relay.config.yaml` (path via `--config` or `~/.relay/config.yaml`).
-- Startup flow: scan sources, reconcile against state, mark-as-read by default.
-- Inbound update_id cursor persistence.
-- Graceful shutdown (flush state, disconnect providers).
-- `--backfill` override.
-
-### Phase 3 — Telegram provider (V1 concrete)
-
-- `@telegram/bot` or direct Bot API HTTP client.
-- `createForumTopic` → destination token.
-- `sendMessage` with `disable_notification` mapping to tier.
-- `getUpdates` long-poll loop, filter for message replies in known topics, emit inbound events.
-- Send-failure handler → disable source mapping.
-- CLI: `relay init` (verify bot token, resolve group IDs), `relay start` (run daemon), `relay status` (show mapped sources + offsets).
+- **Daemon split** (`relayd` bin, `src/daemon.ts`). Persistent macOS launchd agent under label `com.fyang0507.relay`. Listens on `~/.relay/sock` (unix socket, mode 0600). Logs to `~/.relay/daemon.{out,err}.log`.
+- **Thin CLI** (`relay` bin, `src/cli.ts`, modules under `src/commands/`). Subcommands: `init` (install plist + start), `shutdown` (unload + remove plist), `health`, `list`, `add --config <path> [--dry-run]`, `remove --id <id> [--dry-run]`. All except `init`/`shutdown` are socket clients via `RelayClient` (`src/client.ts`).
+- **Socket RPC** (`src/socket.ts`). One request per connection, newline-delimited JSON. Commands: `list`, `add`, `remove`, `health`.
+- **Dynamic source registry**. Sources arrive via `relay add --config <path>` at runtime; the daemon persists them under `registry` in `~/.relay/state.json` (schema v2) keyed by auto-generated `rl_xxxxxx` ids. On restart the registry is replayed so the live source set survives. Idempotent by `(configPath, sourceName)`.
+- **Credentials split**. Project configs have no `providers:` block; each source declares `group_id` inline. The bot token lives in the relay repo's `.env` as `TELEGRAM_BOT_API_TOKEN`, loaded by `src/credentials.ts` (anchored on `import.meta.url` so launchd's cwd-less invocation still finds it).
+- **Launchd integration** (`src/plist.ts`, `src/commands/lifecycle.ts`). `relay init` writes `~/Library/LaunchAgents/com.fyang0507.relay.plist`, `launchctl bootstrap`s it, and polls `health` until the daemon answers. `relay shutdown` is the reverse.
+- **State schema v2**. New `registry` top-level section; each `sources[filePath]` entry gained a `relayId` linking it back to its registry owner. No auto-migration from v1 — operators clear the file and re-register.
+- **Providers**: stdout (always on) and Telegram (registers when credentials are present). Telegram: `createForumTopic` → `sendMessage` → `getUpdates` long-poll, with 429 `retry_after` handling and permanent-disable classification for "topic gone" 400s.
+- **147 tests** across state, watch, dispatch, runtime, config, credentials, telegram, socket, client, daemon, plist, lifecycle, cli.
 
 ### Phase 4 — outreach integration
 
@@ -222,9 +216,9 @@ Tracked under outreach issue #67. Key steps:
 ## Open questions
 
 1. ~~**Topic naming on filename collision.**~~ **Resolved**: topic name is always the file's stem (filename without `.jsonl`). No `sourceName` prefix, no template. Developers dedicate one group chat per task type, so topic collisions are a config-time concern.
-2. **How much of the JSONL payload to render in each Telegram message?** Full payload is verbose; summary-only loses information. Lean on per-type templates for key types (`call.outcome`, `human_question`) with a default "type heading + collapsed JSON" fallback. Decide during Phase 3.
-3. **Relay daemon supervision.** Does relay run via launchd (macOS), systemd (linux), or a foreground `relay start` the user manages? Match outreach daemon's pattern. Probably: foreground with an `init/teardown` wrapper, same as outreach.
-4. **Telemetry / health.** A `relay health` command analogous to `outreach health` — verify bot token, group reachability, writable state dir, configured sources resolve to at least one file. Include in Phase 3.
+2. **How much of the JSONL payload to render in each Telegram message?** Full payload is verbose; summary-only loses information. The default renderer prints `[<tier-key-value>]` + pretty JSON, soft-capped at 3500 chars. Per-type templates for key types (`call.outcome`, `human_question`) are still open — revisit once outreach integration generates usage data.
+3. ~~**Relay daemon supervision.**~~ **Resolved**: macOS launchd agent under label `com.fyang0507.relay`. `relay init` writes the plist and `launchctl bootstrap`s it; `relay shutdown` is the reverse. Linux/systemd parity is deferred.
+4. **Telemetry / health.** **Partially resolved**: `relay health` exists as a thin socket round-trip that reports version, registered-source count, uptime, and socket path. The deeper probe (bot token validity, group reachability, state-dir writability, globs resolving to at least one file) is still open — it would need a new RPC that asks the daemon to exercise each provider, rather than the client doing it out-of-process.
 
 ## References
 

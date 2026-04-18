@@ -3,10 +3,11 @@
   "version": "0.1.0",
   "type": "module",
   "bin": {
-    "relay": "dist/cli.js"
+    "relay": "dist/cli.js",
+    "relayd": "dist/daemon.js"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.build.json && chmod +x dist/cli.js",
+    "build": "tsc -p tsconfig.build.json && chmod +x dist/cli.js dist/daemon.js",
     "test": "node --test 'tests/**/*.test.ts'"
   },
   "engines": {

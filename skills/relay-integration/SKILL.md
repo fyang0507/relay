@@ -32,9 +32,11 @@ Relay is a passive mirror with a return channel. Outbound: new lines in watched 
 
 3. **Emit compliant JSONL.** Every line must be a JSON object with a join-key field (default name: `type`, value: string). All other fields are passthrough — relay pretty-prints them into the Telegram message body. Append-only, one object per line. Lines missing the join-key field or with malformed JSON are silently skipped. If your existing schema uses a different field name (e.g. `event_type`, `kind`), set `tier_key: your_field` on the source and keep your schema unchanged — relay uses `tier_key` as both the tier-policy lookup and the field name it writes on inbound replies.
 
-4. **Wire `relay.config.yaml`.** One entry in `sources` per logical stream of JSONL files. Point `path_glob` at the directory your agents write to. Declare `inbound_types: [human_input]` so relay skips republishing its own inbound writes. See example below.
+4. **Write a `relay.config.yaml`** in your project. One entry in `sources` per logical stream of JSONL files. Point `path_glob` at the directory your agents write to. Declare `group_id` directly (the Telegram supergroup chat id, a negative integer starting with `-100`) and `inbound_types: [human_input]` so relay skips republishing its own inbound writes. The config is credential-free and project-portable — no bot tokens, no `providers:` block. See example below.
 
-5. **Consume `human_input` on agent resume.** When the human replies in Telegram, relay appends a line in this exact shape:
+5. **Install relay once on your machine, then register your project.** In the relay checkout: `npm install && npm run build`, add `TELEGRAM_BOT_API_TOKEN=...` to the relay repo's `.env`, run `relay init` (installs the launchd agent under `com.fyang0507.relay` and starts the daemon). Then, from anywhere, register your project's config with `relay add --config /abs/path/to/your/relay.config.yaml` and verify with `relay list`. Re-run `relay add` after edits to register new sources; existing ones are idempotent by `(configPath, sourceName)`.
+
+6. **Consume `human_input` on agent resume.** When the human replies in Telegram, relay appends a line in this exact shape:
 
     ```json
     {"type":"human_input","timestamp":"2026-04-17T19:30:00.000Z","text":"please wait","source":"relay-inbound"}
@@ -45,18 +47,12 @@ Relay is a passive mirror with a return channel. Outbound: new lines in watched 
 ## Example: a minimal config
 
 ```yaml
-# relay.config.yaml
-providers:
-  telegram:
-    bot_token: ${TELEGRAM_BOT_TOKEN}
-    groups:
-      outreach: -1001234567890
-
+# relay.config.yaml (in your project)
 sources:
   - name: outreach-campaigns
     path_glob: ~/outreach-data/outreach/campaigns/*.jsonl
     provider: telegram
-    group: outreach
+    group_id: -1001234567890
     # tier_key: type   # override if your agents already use a different field name
     inbound_types: [human_input]
     tiers:
@@ -84,12 +80,15 @@ Each new JSONL file matching `path_glob` provisions a Telegram forum topic named
 
 ## Running relay alongside your project
 
-- Install once: `npm install -g` in the relay checkout, or sibling-checkout + `npm link`.
-- `relay init --config your-relay.yaml` to validate config, bot token, and group reachability.
-- `relay start --config your-relay.yaml` as a foreground daemon — supervise it the same way you supervise your project's other long-running processes.
+- **One-time per machine**: `relay init` in the relay checkout. This installs `~/Library/LaunchAgents/com.fyang0507.relay.plist` and starts the daemon via `launchctl bootstrap`. The daemon stays up across logouts and reboots.
+- **Per project**: `relay add --config /abs/path/to/relay.config.yaml` (idempotent). `relay list` to see what's registered. `relay remove --id rl_xxxxxx` to unregister a source; `--dry-run` is available on both `add` and `remove`.
+- **`remove` does not touch provider artifacts.** Unregistering a source stops watching its files and drops its state locally, but relay intentionally does not delete the Telegram topics it created — the messaging platform is treated as a durable archive the operator owns. Delete topics manually in the Telegram UI if you want a clean slate.
+- **Quick checks**: `relay health` (daemon liveness + uptime + registered count).
+- **Uninstall**: `relay shutdown` unloads the launchd agent and removes the plist. `~/.relay/` (state + logs) is preserved; `rm -rf ~/.relay` for a full wipe.
+- **Node binary moved** (nvm switch, Homebrew upgrade): the plist hardcodes `process.execPath` at install time, so re-run `relay init` after any change to your node install.
 
 ## Further reading
 
 - `relay.md` at the relay repo root — architecture, design principles, provider contract, deferred scope.
 - `telegram-setup.md` — Telegram bot + forum-group setup walkthrough.
-- `scripts/integration-test.sh` — a working end-to-end example: spins up a real relay daemon against Telegram, publishes events, waits for a human reply, verifies the JSONL loop.
+- `scripts/integration-test.sh` at the relay repo root — a working end-to-end example: spins up relay against Telegram, publishes events, waits for a human reply, verifies the JSONL loop.
