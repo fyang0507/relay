@@ -1,7 +1,7 @@
 # Relay — Agent-to-Human Observability Layer
 
 Issue: #67 (outreach-side integration)
-Status: v0.1.0 shipped. This doc is the living design reference — where the code and the doc disagree, the code wins and the doc gets updated. See the "v0.1.0 delivered" note under *Implementation phases* for what's actually in the codebase today.
+Status: v1.0.0 shipped. This doc is the living design reference — where the code and the doc disagree, the code wins and the doc gets updated. See the "v1.0.0 delivered" note under *Implementation phases* for what's actually in the codebase today.
 
 ## Problem
 
@@ -176,7 +176,7 @@ Telegram-specific early-detection (`forum_topic_closed` etc.) is an *optimizatio
 
 ## Deferred / V2 scope
 
-Not in v0.1.0; flagged so the core design stays compatible:
+Not in v1.0.0; flagged so the core design stays compatible:
 
 - **Transient-failure retry queue.** Today, if `provider.deliver` throws a transient error (network blip, Telegram 5xx), the offset does not advance and the line only redelivers on the next file append. A source that stops appending is stranded. V2: in-memory retry queue with exponential backoff, persisted across restarts. See the TODO in `src/dispatch.ts`.
 - **Slash commands as a steering primitive** (`/pause`, `/halt`, `/status`) → would map to `{type: "user_command", ...}` entries written to the source file, parallel to how `human_input` works today. Same mechanism, new inbound type. Platform-specific (Telegram and Slack have them; iMessage and email don't), so per-provider.
@@ -184,12 +184,12 @@ Not in v0.1.0; flagged so the core design stays compatible:
 - **Linux/systemd supervision.** Current lifecycle commands shell out to `launchctl` and are macOS-only.
 - **File rotation / truncation handling.** Outreach JSONL is append-only, so not a concern today. If a future consumer rotates files, offset-based state needs a "file identity" concept (inode or content hash).
 - **Multi-observer access control.** Today's design assumes one viewer (the configured group). Read-only observers would be a Telegram group-permissions concern, not relay logic.
-- **Rich rendering templates.** v0.1.0 ships a default JSON-pretty-print renderer. Per-type message templates (markdown, inline keyboards for quick-reply) are a provider-side polish pass.
+- **Rich rendering templates.** v1.0.0 ships a default JSON-pretty-print renderer. Per-type message templates (markdown, inline keyboards for quick-reply) are a provider-side polish pass.
 - **Deep `relay health` probe.** Today's `health` is a liveness RPC only. A deep probe (bot token, group reachability, writable state dir, globs resolving) belongs server-side; see open question #4.
 
 ## Implementation phases
 
-### v0.1.0 delivered
+### v1.0.0 delivered
 
 Phases 1–3 of the original plan shipped; the CLI/daemon split was reworked to drop static config in favor of a dynamic runtime registry. What's in the codebase today:
 

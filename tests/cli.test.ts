@@ -223,7 +223,7 @@ test('printKv aligns colons by longest key', async () => {
   const { stdout } = await captureStdio(async () => {
     printKv([
       ['status', 'ok'],
-      ['version', '0.1.0'],
+      ['version', '1.0.0'],
       ['sources_tracked', '2'],
     ]);
   });
@@ -287,7 +287,7 @@ test('runHealth prints kv block from HealthResult', async () => {
   const client = stubClient({
     health: async () => ({
       ok: true,
-      version: '0.1.0',
+      version: '1.0.0',
       sourcesTracked: 2,
       uptimeSeconds: 143,
     }),
@@ -296,7 +296,7 @@ test('runHealth prints kv block from HealthResult', async () => {
     await runHealth({ client, socketPath: '/tmp/s' });
   });
   assert.match(stdout, /status:\s+ok/);
-  assert.match(stdout, /version:\s+0\.1\.0/);
+  assert.match(stdout, /version:\s+1\.0\.0/);
   assert.match(stdout, /sources_tracked:\s+2/);
   assert.match(stdout, /uptime_seconds:\s+143/);
   assert.match(stdout, /socket:\s+\/tmp\/s/);
