@@ -2,9 +2,9 @@
 // Provider instance` that both dispatch and runtime consume.
 //
 // Key invariants:
-//  - The map key is the exact `provider` string used in `SourceConfig.provider`
-//    (i.e. 'stdout', 'telegram'), which is what dispatch.ts and runtime.ts
-//    look up when handling lines and provisioning.
+//  - The map key is the `ProviderConfig` discriminant (i.e. `'stdout'`,
+//    `'telegram'`), which is what dispatch.ts and runtime.ts look up when
+//    handling lines and provisioning (`source.provider.type`).
 //  - `stdout` is always available — it's the dry-run provider and costs nothing
 //    to include.
 //  - Telegram is instantiated only when `credentials.telegram` is present.
@@ -12,9 +12,12 @@
 //    provider stays side-effect-free w.r.t. disk.
 //
 // Phase 2 split: credentials come from `.env` (see src/credentials.ts), not
-// from the project config file. Sources address their destination chat id
-// directly via `SourceConfig.groupId`, so the telegram provider no longer
-// needs a `groups` name→id map here.
+// from the project config file.
+//
+// Phase 3 (#6): sources address their destination via the nested
+// `provider:` block on `SourceConfig` (`provider.type = 'telegram'`,
+// `provider.groupId = -100...`). This module is unchanged in shape — the
+// map is still keyed by the provider type string.
 
 import type { Credentials } from '../credentials.ts';
 import type { RelayState } from '../state.ts';
@@ -47,8 +50,8 @@ export function buildProviders(
   }
 
   // If credentials.telegram is absent, we deliberately do NOT register a
-  // telegram provider. Any source declaring `provider: telegram` will fail at
-  // add time with a clear "no telegram credentials" message in the runtime —
-  // not here.
+  // telegram provider. Any source declaring `provider.type: telegram` will
+  // fail at add time with a clear "no telegram credentials" message in the
+  // runtime — not here.
   return providers;
 }

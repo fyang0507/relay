@@ -98,8 +98,6 @@ Project configs are credential-free and project-portable: each consumer keeps it
 sources:
   - name: outreach-campaigns
     path_glob: ~/outreach-data/outreach/campaigns/*.jsonl
-    provider: telegram
-    group_id: -1001234567890               # Telegram supergroup chat id (negative, starts with -100)
     inbound_types: [human_input]           # loop prevention: relay writes these, don't re-publish
     tiers:
       call.placed: silent
@@ -110,16 +108,22 @@ sources:
       calendar.added: silent
       human_question: notify
       # anything not listed defaults to silent
+    provider:
+      type: telegram
+      group_id: -1001234567890             # Telegram supergroup chat id (negative, starts with -100)
 
   - name: smart-home-runs
     path_glob: ~/smart-home/runs/*.jsonl
-    provider: telegram
-    group_id: -1009876543210
     inbound_types: [human_input]
     tiers:
       task.ran: silent
       task.failed: notify
+    provider:
+      type: telegram
+      group_id: -1009876543210
 ```
+
+The top-level fields on each source are provider-agnostic (`name`, `path_glob`, `inbound_types`, `tiers`, `tier_key`, `backfill`). Provider-specific settings — Telegram's `group_id`, future Slack/Discord/email fields — nest under `provider:` keyed by `type`. Known provider types: `telegram` (requires `group_id`, a negative Telegram supergroup chat id), `stdout` (no extra fields; dry-run / smoke-test provider).
 
 Tier policy and destination are the human's control surface; consumers (outreach, smart-home) stay tier-unaware and just emit well-typed JSONL. Credentials stay on the operator's machine.
 
@@ -201,7 +205,7 @@ Phases 1–3 of the original plan shipped; the CLI/daemon split was reworked to 
 - **Thin CLI** (`relay` bin, `src/cli.ts`, modules under `src/commands/`). Subcommands: `init` (install plist + start), `shutdown` (unload + remove plist), `health`, `list`, `add --config <path> [--dry-run]`, `remove --id <id> [--dry-run]`. All except `init`/`shutdown` are socket clients via `RelayClient` (`src/client.ts`).
 - **Socket RPC** (`src/socket.ts`). One request per connection, newline-delimited JSON. Commands: `list`, `add`, `remove`, `health`.
 - **Dynamic source registry**. Sources arrive via `relay add --config <path>` at runtime; the daemon persists them under `registry` in `~/.relay/state.json` (schema v2) keyed by auto-generated `rl_xxxxxx` ids. On restart the registry is replayed so the live source set survives. Idempotent by `(configPath, sourceName)`.
-- **Credentials split**. Project configs have no `providers:` block; each source declares `group_id` inline. The bot token lives in the relay repo's `.env` as `TELEGRAM_BOT_API_TOKEN`, loaded by `src/credentials.ts` (anchored on `import.meta.url` so launchd's cwd-less invocation still finds it).
+- **Credentials split**. Project configs have no `providers:` block; each source declares its destination inline under the nested `provider:` block. The bot token lives in the relay repo's `.env` as `TELEGRAM_BOT_API_TOKEN`, loaded by `src/credentials.ts` (anchored on `import.meta.url` so launchd's cwd-less invocation still finds it).
 - **Launchd integration** (`src/plist.ts`, `src/commands/lifecycle.ts`). `relay init` writes `~/Library/LaunchAgents/com.fyang0507.relay.plist`, `launchctl bootstrap`s it, and polls `health` until the daemon answers. `relay shutdown` is the reverse.
 - **State schema v2**. New `registry` top-level section; each `sources[filePath]` entry gained a `relayId` linking it back to its registry owner. No auto-migration from v1 — operators clear the file and re-register.
 - **Providers**: stdout (always on) and Telegram (registers when credentials are present). Telegram: `createForumTopic` → `sendMessage` → `getUpdates` long-poll, with 429 `retry_after` handling and permanent-disable classification for "topic gone" 400s.

@@ -40,17 +40,18 @@ The Bot API has no "list my chats" endpoint, so the standard flow is:
    ```
 
 4. In the JSON, find the matching `message.chat` object. Copy `chat.id`. For supergroups it is a **negative** integer starting with `-100…` (e.g. `-1001234567890`).
-5. Paste it into your project's `relay.config.yaml` on the source that should route to that group — `group_id` is declared per-source, inline:
+5. Paste it into your project's `relay.config.yaml` on the source that should route to that group — `group_id` is declared per-source, under the nested `provider:` block:
 
    ```yaml
    sources:
      - name: outreach-campaigns
        path_glob: ~/outreach-data/outreach/campaigns/*.jsonl
-       provider: telegram
-       group_id: -1001234567890
        inbound_types: [human_input]
        tiers:
          human_question: notify
+       provider:
+         type: telegram
+         group_id: -1001234567890
    ```
 
 If `getUpdates` is empty, the bot either hasn't received a message since its last poll or has an active webhook consuming updates — post again, and check `getWebhookInfo` if still empty.

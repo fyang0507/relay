@@ -40,9 +40,13 @@ export interface RegistryEntry {
   addedAt: string;             // ISO 8601 UTC
 }
 
-// On-disk shape (schema v2). `version` lets us migrate in future.
+// On-disk shape (schema v3). `version` lets us reject stale state files.
+// v3 bump (#6): the registry stores `RegistryEntry.sourceConfig`, whose
+// shape changed (provider settings moved to a nested `provider:` block).
+// We reject v1/v2 state with a clear message and require operators to
+// clear `~/.relay/state.json` and re-register.
 export interface RelayStateShape {
-  version: 2;
+  version: 3;
   sources: Record<string, SourceState>;
   providers: Record<string, Record<string, unknown>>;
   registry: Record<string, RegistryEntry>;
@@ -59,7 +63,7 @@ function expandHome(p: string): string {
 }
 
 function freshState(): RelayStateShape {
-  return { version: 2, sources: {}, providers: {}, registry: {} };
+  return { version: 3, sources: {}, providers: {}, registry: {} };
 }
 
 export class RelayState {
@@ -84,22 +88,22 @@ export class RelayState {
       const parsed = JSON.parse(raw) as Partial<RelayStateShape> & {
         version?: number;
       };
-      // Reject any state file that isn't v2. No auto-migration — operators
+      // Reject any state file that isn't v3. No auto-migration — operators
       // must clear the file and re-register sources.
-      if (parsed.version !== 2) {
+      if (parsed.version !== 3) {
         throw new Error(
-          `State file at ${resolved} is v${parsed.version ?? '<unknown>'}; this relay requires v2. Remove the file and re-register sources.`,
+          `State file at ${resolved} is v${parsed.version ?? '<unknown>'}; this relay requires v3. Remove the file and re-register sources (schema v3 moves provider settings under a nested \`provider:\` block; see relay.md §Configuration schema).`,
         );
       }
       data = {
-        version: 2,
+        version: 3,
         sources: parsed.sources ?? {},
         providers: parsed.providers ?? {},
         registry: parsed.registry ?? {},
       };
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
-        // Fresh state. Treated as v2 from the start.
+        // Fresh state. Treated as v3 from the start.
         data = freshState();
       } else {
         throw err;

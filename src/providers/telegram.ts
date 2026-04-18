@@ -43,9 +43,13 @@ export interface TelegramDestination extends Record<string, unknown> {
 // so state persistence stays in `state.ts` and this class stays side-effect-free
 // w.r.t. disk I/O.
 //
-// Phase 2: no `groups` name→id map anymore. The destination chat id comes
-// from the `SourceConfig.groupId` passed into `provision()` alongside the
-// `SourceMetadata` — credentials and config are now fully separated.
+// Phase 2: no `groups` name→id map anymore — credentials and config are
+// now fully separated.
+//
+// Phase 3 (#6): the per-source chat id lives on the nested
+// `SourceConfig.provider.groupId` (discriminated union variant
+// `{ type: 'telegram', groupId }`). `provision` narrows by discriminant
+// and reads the field from there.
 export interface TelegramProviderOptions {
   botToken: string;
   getUpdateIdCursor: () => number | undefined;
@@ -120,16 +124,20 @@ export class TelegramProvider implements Provider {
   // plumbing, and (b) this leaves the door open for future providers to
   // read additional source-scoped fields at provision time without another
   // round of type surgery.
+  //
+  // Phase 3 (#6): the per-source `groupId` now lives on the nested
+  // `provider` block (discriminated union). We narrow by `provider.type`
+  // and pull the field from there.
   async provision(
     meta: SourceMetadata,
     sourceConfig: SourceConfig,
   ): Promise<Destination> {
-    const groupId = sourceConfig.groupId;
-    if (groupId === undefined) {
+    if (sourceConfig.provider.type !== 'telegram') {
       throw new Error(
-        `telegram.provision: sourceConfig.groupId is required (source=${meta.sourceName})`,
+        `telegram.provision: expected provider.type "telegram", got "${sourceConfig.provider.type}" (source=${meta.sourceName})`,
       );
     }
+    const groupId = sourceConfig.provider.groupId;
     // Topic name is always the file's stem. Developers who want a custom
     // title rename the file. We deliberately do NOT prepend `sourceName`:
     // developers dedicate one group per task type, so a collision is a

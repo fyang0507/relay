@@ -61,12 +61,13 @@ cat > "$CONFIG" <<EOF
 sources:
   - name: integ-test
     path_glob: $TMPDIR_TEST/campaigns/*.jsonl
-    provider: telegram
-    group_id: -1003975893613
     inbound_types: [human_input]
     tiers:
       call.placed: silent
       call.outcome: notify
+    provider:
+      type: telegram
+      group_id: -1003975893613
 EOF
 
 # --- result accumulators (set at each step) ---------------------------------

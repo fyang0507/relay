@@ -33,8 +33,7 @@ function makeSourceConfig(overrides: Partial<SourceConfig> = {}): SourceConfig {
   return {
     name: 'outreach-campaigns',
     pathGlob: '/tmp/outreach/*.jsonl',
-    provider: 'telegram',
-    groupId: -1003975893613,
+    provider: { type: 'telegram', groupId: -1003975893613 },
     inboundTypes: ['human_input'],
     tiers: {},
     ...overrides,
@@ -58,7 +57,7 @@ test('load returns fresh state when file is missing', async () => {
   const p = await mkTmpStatePath('missing');
   const s = await RelayState.load(p);
   const snap = s._snapshot();
-  assert.equal(snap.version, 2);
+  assert.equal(snap.version, 3);
   assert.deepEqual(snap.sources, {});
   assert.deepEqual(snap.providers, {});
   assert.deepEqual(snap.registry, {});
@@ -76,7 +75,20 @@ test('load rejects a v1 state file with a clear message', async () => {
   );
   await assert.rejects(
     () => RelayState.load(p),
-    /is v1; this relay requires v2. Remove the file and re-register sources\./,
+    /is v1; this relay requires v3\./,
+  );
+});
+
+test('load rejects a v2 state file with a clear message (#6 schema bump)', async () => {
+  const p = await mkTmpStatePath('v2-rejected');
+  await fs.mkdir(path.dirname(p), { recursive: true });
+  await fs.writeFile(
+    p,
+    JSON.stringify({ version: 2, sources: {}, providers: {}, registry: {} }),
+  );
+  await assert.rejects(
+    () => RelayState.load(p),
+    /is v2; this relay requires v3\./,
   );
 });
 
@@ -84,10 +96,10 @@ test('load rejects a state file with unknown version', async () => {
   const p = await mkTmpStatePath('vx-rejected');
   await fs.mkdir(path.dirname(p), { recursive: true });
   await fs.writeFile(p, JSON.stringify({ version: 99, sources: {} }));
-  await assert.rejects(() => RelayState.load(p), /requires v2/);
+  await assert.rejects(() => RelayState.load(p), /requires v3/);
 });
 
-test('save + load round-trips state shape (v2)', async () => {
+test('save + load round-trips state shape (v3)', async () => {
   const p = await mkTmpStatePath('roundtrip');
   const s1 = await RelayState.load(p);
 
@@ -105,7 +117,7 @@ test('save + load round-trips state shape (v2)', async () => {
 
   const s2 = await RelayState.load(p);
   const snap = s2._snapshot();
-  assert.equal(snap.version, 2);
+  assert.equal(snap.version, 3);
   assert.deepEqual(snap.sources['/abs/path/to/file.jsonl'], src);
   assert.equal(snap.providers.telegram?.telegramUpdateIdCursor, 987654);
   assert.equal(snap.providers.telegram?.extra, 'hello');
@@ -198,7 +210,7 @@ test('concurrent saves serialize without corrupting the file', async () => {
   // File must parse as valid JSON and contain the final state.
   const raw = await fs.readFile(p, 'utf8');
   const parsed = JSON.parse(raw);
-  assert.equal(parsed.version, 2);
+  assert.equal(parsed.version, 3);
   for (let i = 0; i < 20; i++) {
     assert.equal(parsed.sources[`/files/f${i}.jsonl`].offset, i);
   }
@@ -228,7 +240,7 @@ test('load expands ~ in path', async () => {
   assert.ok(s instanceof RelayState);
 });
 
-// ---- v2 registry --------------------------------------------------------
+// ---- v3 registry --------------------------------------------------------
 
 test('addRegistry + listRegistry + getRegistry round-trip', async () => {
   const p = await mkTmpStatePath('registry-basic');

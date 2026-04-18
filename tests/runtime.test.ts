@@ -35,7 +35,7 @@ function makeSource(dir: string, overrides: Partial<SourceConfig> = {}): SourceC
   return {
     name: 'test-src',
     pathGlob: path.join(dir, '*.jsonl'),
-    provider: 'stub',
+    provider: { type: 'stdout' },
     inboundTypes: ['human_input'],
     tiers: {},
     ...overrides,
@@ -43,8 +43,11 @@ function makeSource(dir: string, overrides: Partial<SourceConfig> = {}): SourceC
 }
 
 // A minimal provider that records provision/deliver calls for assertion.
+// Identifies as 'stdout' so it plugs into the default ProviderConfig
+// variant that requires no extra fields (runtime looks up providers by
+// `source.provider.type`).
 class StubProvider implements Provider {
-  public readonly name = 'stub';
+  public readonly name = 'stdout';
   public provisionCalls: Array<{
     sourceName: string;
     filenameStem: string;
@@ -305,7 +308,7 @@ test('listSources returns flat projection of registry + tracking state', async (
   assert.equal(listed[0].id, id);
   assert.equal(listed[0].configPath, '/conf/list.yaml');
   assert.equal(listed[0].sourceName, 'listme');
-  assert.equal(listed[0].provider, 'stub');
+  assert.equal(listed[0].provider, 'stdout');
   assert.equal(listed[0].groupId, undefined, 'stub provider has no group_id');
   assert.equal(listed[0].filesTracked, 1);
   assert.equal(listed[0].disabled, false);
@@ -453,55 +456,10 @@ test('provision receives filenameStem as the topic identifier', async (t) => {
   await relay.stop();
 });
 
-test('telegram source without groupId: runtime logs and does NOT track file', async (t) => {
-  // Phase 2 guard: a hand-crafted SourceConfig that bypasses loadConfig and
-  // declares provider=telegram with no groupId should fail localized in the
-  // runtime (no cryptic downstream API error).
-  const dir = await mkTmpDir('tg-no-group-id');
-  t.after(() => fsp.rm(dir, { recursive: true, force: true }));
-  const statePath = path.join(dir, 'state.json');
-
-  const filePath = path.join(dir, 'tg.jsonl');
-  await fsp.writeFile(filePath, '');
-
-  const state = await RelayState.load(statePath);
-  // Register a telegram-provider source with no groupId. We use the StubProvider
-  // but name it 'telegram' so the runtime's guard fires.
-  const provider = new StubProvider();
-  (provider as { name: string }).name = 'telegram';
-  const source = makeSource(dir, { name: 'tg-src', provider: 'telegram' });
-
-  const { relay } = buildRuntime(state, provider);
-
-  // Capture console.warn so we can assert the runtime logged the missing
-  // group_id rather than calling provision.
-  const warnings: string[] = [];
-  const origWarn = console.warn;
-  console.warn = (...args: unknown[]) => {
-    warnings.push(args.map(String).join(' '));
-  };
-  t.after(() => {
-    console.warn = origWarn;
-  });
-
-  await relay.start();
-  await relay.addSource(source, '/conf/tg.yaml');
-  await delay(SETTLE_MS);
-
-  assert.equal(
-    provider.provisionCalls.length,
-    0,
-    'provision must not run when telegram source is missing group_id',
-  );
-  assert.ok(
-    warnings.some((w) => /missing group_id/.test(w)),
-    `expected a "missing group_id" warning; got: ${JSON.stringify(warnings)}`,
-  );
-  // No state entry for the file since it was never provisioned.
-  assert.equal(state.getSource(filePath), undefined);
-
-  await relay.stop();
-});
+// (#6) Phase 2's runtime guard for "telegram source without groupId" was
+// removed: the discriminated union `{ type: 'telegram'; groupId: number }`
+// makes that state unreachable at the type level. Config-load validation
+// still enforces it on the YAML side.
 
 test('file created after addSource: first line is delivered (GH #4)', async (t) => {
   // Regression for GitHub #4. When a JSONL file is created while a source is

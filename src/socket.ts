@@ -339,13 +339,19 @@ export class SocketServer {
     }
 
     if (dryRun) {
+      // Wire shape for dry-run entries stays flat (provider + optional
+      // groupId) so existing CLI/script consumers don't have to care that
+      // the config schema moved provider-specific fields into a nested
+      // block. We flatten on the server side here.
       const wouldAdd: AddDryRunEntry[] = result.config.sources.map((s) => {
         const entry: AddDryRunEntry = {
           name: s.name,
-          provider: s.provider,
+          provider: s.provider.type,
           pathGlob: s.pathGlob,
         };
-        if (s.groupId !== undefined) entry.groupId = s.groupId;
+        if (s.provider.type === 'telegram') {
+          entry.groupId = s.provider.groupId;
+        }
         return entry;
       });
       return {
