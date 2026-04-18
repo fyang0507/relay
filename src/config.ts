@@ -212,6 +212,58 @@ function validateSource(
   if (obj.tier_key !== undefined) {
     out.tierKey = requireNonEmptyString(obj.tier_key, `${pathStr}.tier_key`);
   }
+
+  // Optional outbound field allowlist. Non-empty array of non-empty strings
+  // with no duplicates (duplicates usually signal a typo, not intent).
+  if (obj.deliver_fields !== undefined) {
+    const arr = requireArray(obj.deliver_fields, `${pathStr}.deliver_fields`);
+    if (arr.length === 0) {
+      throw new Error(
+        `Invalid config at ${pathStr}.deliver_fields: must be non-empty when set (omit the key to deliver all fields)`,
+      );
+    }
+    const fields: string[] = [];
+    const seenFields = new Set<string>();
+    for (let i = 0; i < arr.length; i++) {
+      const field = requireNonEmptyString(
+        arr[i],
+        `${pathStr}.deliver_fields[${i}]`,
+      );
+      if (seenFields.has(field)) {
+        throw new Error(
+          `Invalid config at ${pathStr}.deliver_fields[${i}]: duplicate field "${field}"`,
+        );
+      }
+      seenFields.add(field);
+      fields.push(field);
+    }
+    out.deliverFields = fields;
+  }
+
+  // Optional per-field character cap. Only meaningful alongside
+  // `deliver_fields`; reject it standalone so operators don't quietly get
+  // "the cap is set but nothing is being projected" when they forget the
+  // companion key.
+  if (obj.deliver_field_max_chars !== undefined) {
+    if (out.deliverFields === undefined) {
+      throw new Error(
+        `Invalid config at ${pathStr}.deliver_field_max_chars: only valid when deliver_fields is also set`,
+      );
+    }
+    const v = obj.deliver_field_max_chars;
+    if (typeof v !== 'number' || !Number.isFinite(v) || !Number.isInteger(v)) {
+      throw new Error(
+        `Invalid config at ${pathStr}.deliver_field_max_chars: expected integer, got ${String(v)}`,
+      );
+    }
+    if (v < 20 || v > 4096) {
+      throw new Error(
+        `Invalid config at ${pathStr}.deliver_field_max_chars: must be in [20, 4096], got ${v}`,
+      );
+    }
+    out.deliverFieldMaxChars = v;
+  }
+
   if (obj.backfill !== undefined) {
     if (typeof obj.backfill !== 'boolean') {
       throw new Error(

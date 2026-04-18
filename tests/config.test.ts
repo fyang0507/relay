@@ -320,3 +320,194 @@ sources:
   assert.equal(config.sources[0].provider, 'stdout');
   assert.equal(config.sources[0].groupId, undefined);
 });
+
+test('accepts deliver_fields + deliver_field_max_chars and camelCases', async () => {
+  const fp = await mkTmpConfig(
+    'deliver-fields',
+    `
+sources:
+  - name: s
+    path_glob: /tmp/*.jsonl
+    provider: telegram
+    group_id: -1
+    inbound_types: [human_input]
+    deliver_fields: [tool, args, notes]
+    deliver_field_max_chars: 500
+`,
+  );
+  const { config } = await loadConfig(fp);
+  assert.deepEqual(config.sources[0].deliverFields, ['tool', 'args', 'notes']);
+  assert.equal(config.sources[0].deliverFieldMaxChars, 500);
+});
+
+test('omitting deliver_fields leaves both fields unset', async () => {
+  const fp = await mkTmpConfig(
+    'deliver-omitted',
+    `
+sources:
+  - name: s
+    path_glob: /tmp/*.jsonl
+    provider: telegram
+    group_id: -1
+    inbound_types: [human_input]
+`,
+  );
+  const { config } = await loadConfig(fp);
+  assert.equal(config.sources[0].deliverFields, undefined);
+  assert.equal(config.sources[0].deliverFieldMaxChars, undefined);
+});
+
+test('deliver_fields: rejects empty array', async () => {
+  const fp = await mkTmpConfig(
+    'deliver-empty',
+    `
+sources:
+  - name: s
+    path_glob: /tmp/*.jsonl
+    provider: telegram
+    group_id: -1
+    inbound_types: [human_input]
+    deliver_fields: []
+`,
+  );
+  await assert.rejects(
+    () => loadConfig(fp),
+    /sources\[0\]\.deliver_fields.*non-empty/s,
+  );
+});
+
+test('deliver_fields: rejects non-array', async () => {
+  const fp = await mkTmpConfig(
+    'deliver-not-array',
+    `
+sources:
+  - name: s
+    path_glob: /tmp/*.jsonl
+    provider: telegram
+    group_id: -1
+    inbound_types: [human_input]
+    deliver_fields: "tool"
+`,
+  );
+  await assert.rejects(
+    () => loadConfig(fp),
+    /sources\[0\]\.deliver_fields.*expected array/s,
+  );
+});
+
+test('deliver_fields: rejects empty-string entry', async () => {
+  const fp = await mkTmpConfig(
+    'deliver-empty-string',
+    `
+sources:
+  - name: s
+    path_glob: /tmp/*.jsonl
+    provider: telegram
+    group_id: -1
+    inbound_types: [human_input]
+    deliver_fields: [tool, ""]
+`,
+  );
+  await assert.rejects(
+    () => loadConfig(fp),
+    /sources\[0\]\.deliver_fields\[1\].*non-empty/s,
+  );
+});
+
+test('deliver_fields: rejects duplicates', async () => {
+  const fp = await mkTmpConfig(
+    'deliver-dup',
+    `
+sources:
+  - name: s
+    path_glob: /tmp/*.jsonl
+    provider: telegram
+    group_id: -1
+    inbound_types: [human_input]
+    deliver_fields: [tool, args, tool]
+`,
+  );
+  await assert.rejects(
+    () => loadConfig(fp),
+    /sources\[0\]\.deliver_fields\[2\].*duplicate/s,
+  );
+});
+
+test('deliver_field_max_chars: rejected when deliver_fields is not set', async () => {
+  const fp = await mkTmpConfig(
+    'cap-orphan',
+    `
+sources:
+  - name: s
+    path_glob: /tmp/*.jsonl
+    provider: telegram
+    group_id: -1
+    inbound_types: [human_input]
+    deliver_field_max_chars: 500
+`,
+  );
+  await assert.rejects(
+    () => loadConfig(fp),
+    /deliver_field_max_chars.*only valid when deliver_fields/s,
+  );
+});
+
+test('deliver_field_max_chars: rejects non-integer', async () => {
+  const fp = await mkTmpConfig(
+    'cap-float',
+    `
+sources:
+  - name: s
+    path_glob: /tmp/*.jsonl
+    provider: telegram
+    group_id: -1
+    inbound_types: [human_input]
+    deliver_fields: [tool]
+    deliver_field_max_chars: 12.5
+`,
+  );
+  await assert.rejects(
+    () => loadConfig(fp),
+    /deliver_field_max_chars.*expected integer/s,
+  );
+});
+
+test('deliver_field_max_chars: rejects out-of-range (too low)', async () => {
+  const fp = await mkTmpConfig(
+    'cap-low',
+    `
+sources:
+  - name: s
+    path_glob: /tmp/*.jsonl
+    provider: telegram
+    group_id: -1
+    inbound_types: [human_input]
+    deliver_fields: [tool]
+    deliver_field_max_chars: 10
+`,
+  );
+  await assert.rejects(
+    () => loadConfig(fp),
+    /deliver_field_max_chars.*\[20, 4096\]/s,
+  );
+});
+
+test('deliver_field_max_chars: rejects out-of-range (too high)', async () => {
+  const fp = await mkTmpConfig(
+    'cap-high',
+    `
+sources:
+  - name: s
+    path_glob: /tmp/*.jsonl
+    provider: telegram
+    group_id: -1
+    inbound_types: [human_input]
+    deliver_fields: [tool]
+    deliver_field_max_chars: 5000
+`,
+  );
+  await assert.rejects(
+    () => loadConfig(fp),
+    /deliver_field_max_chars.*\[20, 4096\]/s,
+  );
+});

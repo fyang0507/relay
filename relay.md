@@ -139,6 +139,10 @@ Relay ships a `SKILL.md` documenting this contract so consumers know what to emi
 
 **`inbound_types`**: per-source list of type names that relay itself writes (inbound replies appended to the file). Relay's outbound watcher skips lines whose `type` is in this list, preventing loopback. This replaces a blanket `ignore` tier — the concept is structural (what-I-wrote vs what-I-watch), not policy (important vs unimportant).
 
+**`deliver_fields`** (optional, per-source): outbound field allowlist. When set, each line's body is projected to these top-level keys (in the listed order) before rendering — missing keys are silently absent. The header `[<tier-key-value>]` is unaffected, so operators do not have to re-list the tier-key to keep the header. The filter is source-wide, so sources that emit multiple line shapes need a union that covers all of them. No nested paths — top-level keys only. Example: `deliver_fields: [tool, args, notes]` strips `trace_id`, `internal_state`, and similar scratch fields while keeping the signal.
+
+**`deliver_field_max_chars`** (optional, per-source; only valid alongside `deliver_fields`): integer in `[20, 4096]`. Each projected field's rendered value is individually capped at this many chars. String values over the cap are truncated to `cap-3` chars + `...`. Non-string values (objects, arrays) are probed via `JSON.stringify`; if over the cap the value is replaced with the truncated stringified form. Per-field (rather than per-message) so one oversize field cannot starve the rest.
+
 ## Startup and backfill behavior
 
 On daemon start (launchd brings `relayd` up automatically; the flow below is identical whether via `relay init` or a fresh login):
@@ -184,7 +188,7 @@ Not in v1.0.0; flagged so the core design stays compatible:
 - **Linux/systemd supervision.** Current lifecycle commands shell out to `launchctl` and are macOS-only.
 - **File rotation / truncation handling.** Outreach JSONL is append-only, so not a concern today. If a future consumer rotates files, offset-based state needs a "file identity" concept (inode or content hash).
 - **Multi-observer access control.** Today's design assumes one viewer (the configured group). Read-only observers would be a Telegram group-permissions concern, not relay logic.
-- **Rich rendering templates.** v1.0.0 ships a default JSON-pretty-print renderer. Per-type message templates (markdown, inline keyboards for quick-reply) are a provider-side polish pass.
+- **Rich rendering templates.** v1.0.0 ships a default JSON-pretty-print renderer with per-source field filtering (`deliver_fields`) and per-field truncation (`deliver_field_max_chars`) — see the Configuration schema. Per-type message templates (markdown, inline keyboards for quick-reply) remain deferred as a provider-side polish pass.
 - **Deep `relay health` probe.** Today's `health` is a liveness RPC only. A deep probe (bot token, group reachability, writable state dir, globs resolving) belongs server-side; see open question #4.
 
 ## Implementation phases
@@ -216,7 +220,7 @@ Tracked under outreach issue #67. Key steps:
 ## Open questions
 
 1. ~~**Topic naming on filename collision.**~~ **Resolved**: topic name is always the file's stem (filename without `.jsonl`). No `sourceName` prefix, no template. Developers dedicate one group chat per task type, so topic collisions are a config-time concern.
-2. **How much of the JSONL payload to render in each Telegram message?** Full payload is verbose; summary-only loses information. The default renderer prints `[<tier-key-value>]` + pretty JSON, soft-capped at 3500 chars. Per-type templates for key types (`call.outcome`, `human_question`) are still open — revisit once outreach integration generates usage data.
+2. **How much of the JSONL payload to render in each Telegram message?** Full payload is verbose; summary-only loses information. The default renderer prints `[<tier-key-value>]` + pretty JSON, soft-capped at 3500 chars. v1.1 adds per-source `deliver_fields` (top-level allowlist) and `deliver_field_max_chars` (per-field cap) so operators can cut noise and bound message size without a full template language. Per-type templates for key types (`call.outcome`, `human_question`) are still open — revisit once outreach integration generates usage data.
 3. ~~**Relay daemon supervision.**~~ **Resolved**: macOS launchd agent under label `com.fyang0507.relay`. `relay init` writes the plist and `launchctl bootstrap`s it; `relay shutdown` is the reverse. Linux/systemd parity is deferred.
 4. **Telemetry / health.** **Partially resolved**: `relay health` exists as a thin socket round-trip that reports version, registered-source count, uptime, and socket path. The deeper probe (bot token validity, group reachability, state-dir writability, globs resolving to at least one file) is still open — it would need a new RPC that asks the daemon to exercise each provider, rather than the client doing it out-of-process.
 

@@ -175,7 +175,10 @@ export class RelayDispatcher {
       return;
     }
 
-    const text = renderLine(ev.parsed, ev.raw, keyField);
+    const text = renderLine(ev.parsed, ev.raw, keyField, {
+      deliverFields: source.deliverFields,
+      deliverFieldMaxChars: source.deliverFieldMaxChars,
+    });
 
     let result;
     try {
