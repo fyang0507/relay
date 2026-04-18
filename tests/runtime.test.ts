@@ -503,6 +503,64 @@ test('telegram source without groupId: runtime logs and does NOT track file', as
   await relay.stop();
 });
 
+test('file created after addSource: first line is delivered (GH #4)', async (t) => {
+  // Regression for GitHub #4. When a JSONL file is created while a source is
+  // actively watching (chokidar fires 'add' after 'ready'), the runtime must
+  // start the tail at offset 0 rather than stat.size, otherwise the creating
+  // write races and the first line is lost.
+  const dir = await mkTmpDir('new-after-add');
+  t.after(() => fsp.rm(dir, { recursive: true, force: true }));
+  const statePath = path.join(dir, 'state.json');
+
+  const state = await RelayState.load(statePath);
+  const source = makeSource(dir, { name: 'new-file-src' });
+
+  // Provider that records every deliver() call so we can assert the first
+  // line reaches the provider.
+  const delivered: Array<{ text: string; tier: string }> = [];
+  class RecordingProvider extends StubProvider {
+    async deliver(
+      _destination: Destination,
+      text: string,
+      tier: string,
+    ): Promise<DeliverResult> {
+      delivered.push({ text, tier });
+      return { ok: true };
+    }
+  }
+  const provider = new RecordingProvider();
+  const { relay } = buildRuntime(state, provider);
+
+  await relay.start();
+  await relay.addSource(source, '/conf/new.yaml');
+  // Let chokidar's initial scan + 'ready' event settle BEFORE we create
+  // the file. This is what makes the file count as "created while watching".
+  await delay(SETTLE_MS);
+
+  // Now create the file with content. With the bug, the starting offset is
+  // set to stat.size and the first line is never delivered.
+  const filePath = path.join(dir, 'new.jsonl');
+  const line = JSON.stringify({ type: 'first', data: 'hello' });
+  await fsp.writeFile(filePath, line + '\n');
+  await delay(SETTLE_MS);
+
+  assert.equal(
+    provider.provisionCalls.length,
+    1,
+    'provision must fire for the newly-created file',
+  );
+  const ss = state.getSource(filePath);
+  assert.ok(ss, 'state should have an entry for the new file');
+  assert.equal(
+    delivered.length,
+    1,
+    `expected the first line to reach deliver(); saw ${JSON.stringify(delivered)}`,
+  );
+  assert.match(delivered[0].text, /first/);
+
+  await relay.stop();
+});
+
 test('disabled source: runtime does NOT track file', async (t) => {
   const dir = await mkTmpDir('disabled');
   t.after(() => fsp.rm(dir, { recursive: true, force: true }));

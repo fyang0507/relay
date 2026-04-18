@@ -50,6 +50,11 @@ interface DirWatcherEntry {
   // Files this directory watcher has discovered and surfaced — used by
   // removeSource() to untrack every tail it started.
   discoveredFiles: Set<string>;
+  // Set true once chokidar emits its initial 'ready' event. Used to
+  // distinguish pre-existing files (discovered during the initial scan)
+  // from files created after watching began. See `fileDiscovered` event
+  // payload's `wasPreexisting` field.
+  ready: boolean;
 }
 
 // Expand a leading `~` to the user's home directory.
@@ -107,7 +112,14 @@ function globToRegex(pattern: string): RegExp {
 }
 
 // Public event map (documented here for maintainers; EventEmitter is untyped).
-//   'fileDiscovered' (filePath: string, sourceName: string)
+//   'fileDiscovered' (filePath: string, sourceName: string, wasPreexisting: boolean)
+//       wasPreexisting=true: file was present when chokidar's initial scan
+//         ran (i.e. 'add' fired before 'ready'). Consumers should respect
+//         the "mark-as-read" policy for these files (see relay.md §Startup
+//         and backfill behavior).
+//       wasPreexisting=false: file was created after the watcher went live.
+//         Consumers should observe from offset 0 so the creating write is
+//         not lost to a stat-size race.
 //   'line'           (event: LineEvent)
 //   'truncated'      (filePath: string)
 //   'error'          (err: Error)
@@ -160,13 +172,24 @@ export class RelayWatcher extends EventEmitter {
       sourceName: source.name,
       watcher,
       discoveredFiles: new Set<string>(),
+      ready: false,
     };
 
     watcher.on('add', (filePath: string) => {
       const rel = path.relative(baseDir, filePath);
       if (!regex.test(rel)) return;
       entry.discoveredFiles.add(filePath);
-      this.emit('fileDiscovered', filePath, source.name);
+      // `ready` flips to true after chokidar's initial scan completes; any
+      // 'add' before then is a pre-existing file, any after is a file
+      // created while we were actively watching. Consumers use this to
+      // decide whether to start at offset 0 (new file) or stat.size
+      // (pre-existing — mark-as-read). See GH #4.
+      const wasPreexisting = !entry.ready;
+      this.emit('fileDiscovered', filePath, source.name, wasPreexisting);
+    });
+
+    watcher.on('ready', () => {
+      entry.ready = true;
     });
 
     watcher.on('error', (err: unknown) => {

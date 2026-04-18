@@ -63,7 +63,11 @@ export class Relay {
   private readonly options: RelayOptions;
 
   // Bound handlers so start() and stop() attach/detach the same references.
-  private readonly onFileDiscovered: (filePath: string, sourceName: string) => void;
+  private readonly onFileDiscovered: (
+    filePath: string,
+    sourceName: string,
+    wasPreexisting: boolean,
+  ) => void;
   private readonly onTruncated: (filePath: string) => void;
 
   private started = false;
@@ -76,14 +80,16 @@ export class Relay {
     this.dispatcher = opts.dispatcher;
     this.options = opts.options ?? {};
 
-    this.onFileDiscovered = (filePath, sourceName) => {
+    this.onFileDiscovered = (filePath, sourceName, wasPreexisting) => {
       // Fire-and-forget: the watcher emits synchronously but provisioning may
       // involve network I/O. State writes are serialized internally.
-      void this.handleFileDiscovered(filePath, sourceName).catch((err) => {
-        console.warn(
-          `[runtime] uncaught error while handling fileDiscovered for ${filePath}: ${(err as Error).message}`,
-        );
-      });
+      void this.handleFileDiscovered(filePath, sourceName, wasPreexisting).catch(
+        (err) => {
+          console.warn(
+            `[runtime] uncaught error while handling fileDiscovered for ${filePath}: ${(err as Error).message}`,
+          );
+        },
+      );
     };
     this.onTruncated = (filePath) => {
       // V1: watcher already halted tailing. We warn; an operator must decide
@@ -249,6 +255,7 @@ export class Relay {
   private async handleFileDiscovered(
     filePath: string,
     sourceName: string,
+    wasPreexisting: boolean,
   ): Promise<void> {
     // Look up the registry entry by source name. Registry is the single
     // source of truth; we need the relayId to stamp on SourceState.
@@ -324,13 +331,18 @@ export class Relay {
       return;
     }
 
-    // Starting offset: backfill from 0 if either the global flag or the
-    // per-source flag is set; otherwise mark-as-read (stat the file and use
-    // its current size). See relay.md §Startup and backfill behavior.
+    // Starting offset policy (see relay.md §Startup and backfill behavior,
+    // and GH #4 for the "new file" carve-out):
+    //   - File created while we're watching (wasPreexisting=false)
+    //       → offset 0 unconditionally. We're there to observe it from birth;
+    //         stat.size races with the creating write and loses the first line.
+    //   - Pre-existing file + backfill flag      → offset 0 (read history).
+    //   - Pre-existing file + no backfill (default) → offset = stat.size
+    //         (mark-as-read; don't replay the past on startup).
     const shouldBackfill =
       this.options.backfill === true || source.backfill === true;
     let offset = 0;
-    if (!shouldBackfill) {
+    if (wasPreexisting && !shouldBackfill) {
       try {
         const stat = await fsp.stat(filePath);
         offset = stat.size;

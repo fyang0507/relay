@@ -300,3 +300,47 @@ test('removeSource on unknown name is a no-op', async (t) => {
   await watcher.stop();
   assert.ok(true);
 });
+
+test('fileDiscovered carries wasPreexisting: true for pre-scan files and false for post-ready adds', async (t) => {
+  // GH #4: distinguishes files present at addSource time (pre-existing,
+  // mark-as-read) from files created after the watcher goes live (new, must
+  // observe from offset 0 so the creating write is not lost).
+  const dir = await makeTmpDir('was-pre');
+  t.after(() => fsp.rm(dir, { recursive: true, force: true }));
+
+  // File that exists BEFORE the watcher starts: should be pre-existing.
+  const preFile = path.join(dir, 'pre.jsonl');
+  await fsp.writeFile(preFile, '');
+
+  const watcher = new RelayWatcher();
+  const events: Array<{ filePath: string; wasPreexisting: boolean }> = [];
+  watcher.on(
+    'fileDiscovered',
+    (fp: string, _sn: string, wasPreexisting: boolean) => {
+      events.push({ filePath: fp, wasPreexisting });
+    },
+  );
+
+  await watcher.start();
+  await watcher.addSource(makeSource(dir));
+  // Give chokidar time for the initial scan + 'ready' event.
+  await delay(SETTLE_MS);
+
+  // Now create a NEW file — must be reported as wasPreexisting=false.
+  const newFile = path.join(dir, 'new.jsonl');
+  await fsp.writeFile(newFile, '');
+  await delay(SETTLE_MS);
+
+  const pre = events.find((e) => e.filePath === preFile);
+  const fresh = events.find((e) => e.filePath === newFile);
+  assert.ok(pre, `expected discovery of ${preFile}; saw ${JSON.stringify(events)}`);
+  assert.equal(pre.wasPreexisting, true, 'pre-existing file must be marked true');
+  assert.ok(fresh, `expected discovery of ${newFile}; saw ${JSON.stringify(events)}`);
+  assert.equal(
+    fresh.wasPreexisting,
+    false,
+    'file created after ready must be marked false',
+  );
+
+  await watcher.stop();
+});
