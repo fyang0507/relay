@@ -432,6 +432,69 @@ describe('RelayDispatcher outbound', () => {
     await d.stop();
   });
 
+  it('disableMapping=true: logs a single warn on the transition and does not re-log on subsequent appends', async () => {
+    const statePath = await mkTmpStatePath('disable-log');
+    const state = await RelayState.load(statePath);
+    const source = makeSource();
+    const provider = new StubProvider();
+    provider.deliverImpl = async () => ({
+      ok: false,
+      reason: 'topic not found',
+      disableMapping: true,
+    });
+    const watcher = fakeWatcher();
+
+    const filePath = '/tmp/disable-log.jsonl';
+    state.setSource(filePath, makeSourceState({ sourceName: source.name }));
+
+    const d = new RelayDispatcher({
+      resolveSource: resolver([source]),
+      state,
+      providers: new Map([['stub', provider]]),
+      watcher,
+    });
+    d.start();
+
+    const origWarn = console.warn;
+    const warnCalls: string[] = [];
+    console.warn = (...args: unknown[]) => {
+      warnCalls.push(args.map((a) => String(a)).join(' '));
+    };
+
+    try {
+      // First append: triggers disable transition — expect exactly one warn.
+      watcher.emit('line', lineEvent({ filePath, lineEndOffset: 60 }));
+      await delay(20);
+
+      assert.equal(warnCalls.length, 1, 'exactly one warn expected on disable transition');
+      const msg = warnCalls[0];
+      assert.ok(msg.includes(filePath), `warn message should include file path: ${msg}`);
+      assert.ok(msg.includes(source.provider), `warn message should include provider name: ${msg}`);
+      assert.ok(msg.includes('topic not found'), `warn message should include reason: ${msg}`);
+
+      // Second append to the same (now-disabled) file: no additional warn.
+      watcher.emit(
+        'line',
+        lineEvent({
+          filePath,
+          lineStartOffset: 60,
+          lineEndOffset: 120,
+          parsed: { type: 'call.placed', timestamp: 'ts-2' },
+        }),
+      );
+      await delay(20);
+
+      assert.equal(
+        warnCalls.length,
+        1,
+        'no additional warn when appending to an already-disabled mapping',
+      );
+    } finally {
+      console.warn = origWarn;
+      await d.stop();
+    }
+  });
+
   it('transient failure: no disableSource, offset NOT advanced', async () => {
     const statePath = await mkTmpStatePath('transient');
     const state = await RelayState.load(statePath);

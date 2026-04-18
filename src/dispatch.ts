@@ -196,6 +196,13 @@ export class RelayDispatcher {
     }
 
     if (result.disableMapping) {
+      // Log exactly once on the transition. We only reach this branch when
+      // `current.disabled` was falsy (the disabled short-circuit above would
+      // have returned earlier), so no extra guard is needed: subsequent
+      // appends take the `current.disabled` path and stay silent.
+      console.warn(
+        `[dispatch] disabling file mapping for ${ev.filePath} (provider=${source.provider}, reason=${result.reason}); future appends to this file will be skipped until the mapping is re-enabled`,
+      );
       this.state.disableSource(ev.filePath, result.reason);
       // Do NOT advance offset: once the user reconfigures and we re-enable
       // the mapping, this same line should retry from its original position.
