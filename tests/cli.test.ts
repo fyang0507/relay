@@ -108,6 +108,7 @@ const FIXTURE_SOURCES: ListedSource[] = [
     provider: 'telegram',
     groupId: -1003975893613,
     filesTracked: 3,
+    filesDisabled: 0,
     disabled: false,
   },
   {
@@ -116,6 +117,7 @@ const FIXTURE_SOURCES: ListedSource[] = [
     sourceName: 'other-source',
     provider: 'stdout',
     filesTracked: 0,
+    filesDisabled: 0,
     disabled: false,
   },
 ];
@@ -334,6 +336,33 @@ test('runList prints one block per source', async () => {
   // source without groupId should omit the line
   const secondBlock = stdout.split('\n\n')[1] ?? '';
   assert.ok(!/group_id/.test(secondBlock), 'second block should omit group_id');
+  // filesDisabled === 0 → render plain count with no suffix.
+  assert.match(stdout, /files_tracked:\s+3\n/);
+  assert.ok(
+    !/\(\d+ disabled\)/.test(stdout),
+    'no "(N disabled)" suffix when filesDisabled === 0',
+  );
+});
+
+test('runList appends "(N disabled)" suffix when filesDisabled > 0', async () => {
+  const client = stubClient({
+    list: async () => [
+      {
+        id: 'rl_disabled',
+        configPath: '/abs/c.yaml',
+        sourceName: 'mixed',
+        provider: 'telegram',
+        groupId: -200,
+        filesTracked: 2,
+        filesDisabled: 1,
+        disabled: false,
+      },
+    ],
+  });
+  const { stdout } = await captureStdio(async () => {
+    await runList({ client, socketPath: '/tmp/s' });
+  });
+  assert.match(stdout, /files_tracked:\s+2\s+\(1 disabled\)/);
 });
 
 test('runList on empty registry prints helpful hint', async () => {

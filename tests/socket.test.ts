@@ -52,13 +52,17 @@ class FakeRelay {
 
   listSources(): ListedSource[] {
     return this.state.listRegistry().map((e) => {
+      const files = this.state.listSourcesByRelayId(e.id);
+      const filesTracked = files.length;
+      const filesDisabled = files.filter((f) => f.state.disabled === true).length;
       const out: ListedSource = {
         id: e.id,
         configPath: e.configPath,
         sourceName: e.sourceConfig.name,
         provider: e.sourceConfig.provider,
-        filesTracked: 0,
-        disabled: false,
+        filesTracked,
+        filesDisabled,
+        disabled: filesTracked > 0 && filesDisabled === filesTracked,
       };
       if (e.sourceConfig.groupId !== undefined) {
         out.groupId = e.sourceConfig.groupId;
@@ -195,6 +199,59 @@ test('list returns empty sources by default, then reflects registry', async (t) 
   assert.equal(resp.sources.length, 1);
   assert.equal(resp.sources[0].sourceName, 'planted');
   assert.equal(resp.sources[0].provider, 'stdout');
+  // No tracked files yet — both counts are zero.
+  assert.equal(resp.sources[0].filesTracked, 0);
+  assert.equal(resp.sources[0].filesDisabled, 0);
+});
+
+test('list surfaces filesDisabled count from per-file state', async (t) => {
+  const h = await startHarness('list-disabled');
+  t.after(() => h.cleanup());
+
+  const id = await h.relay.addSource(
+    {
+      name: 'mixed',
+      pathGlob: '/tmp/mixed/*.jsonl',
+      provider: 'stdout',
+      inboundTypes: ['human_input'],
+      tiers: {},
+    },
+    '/abs/relay.yaml',
+  );
+
+  // Plant three tracked files: two disabled, one healthy.
+  const baseState = {
+    sourceName: 'mixed',
+    relayId: id,
+    offset: 0,
+    destination: { kind: 'stdout', sourceName: 'mixed' } as Record<string, unknown>,
+    destinationKey: '',
+  };
+  h.state.setSource('/tmp/mixed/a.jsonl', {
+    ...baseState,
+    destinationKey: 'stdout://mixed/a',
+  });
+  h.state.setSource('/tmp/mixed/b.jsonl', {
+    ...baseState,
+    destinationKey: 'stdout://mixed/b',
+    disabled: true,
+    disabledReason: 'topic gone',
+  });
+  h.state.setSource('/tmp/mixed/c.jsonl', {
+    ...baseState,
+    destinationKey: 'stdout://mixed/c',
+    disabled: true,
+    disabledReason: 'topic gone',
+  });
+
+  const resp = await rpc<{ ok: boolean; sources: ListedSource[] }>(h.socketPath, {
+    cmd: 'list',
+  });
+  assert.equal(resp.sources.length, 1);
+  assert.equal(resp.sources[0].filesTracked, 3);
+  assert.equal(resp.sources[0].filesDisabled, 2);
+  // Not every file is disabled — aggregate `disabled` stays false.
+  assert.equal(resp.sources[0].disabled, false);
 });
 
 test('add happy path registers sources and returns warnings', async (t) => {

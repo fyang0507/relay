@@ -85,6 +85,7 @@ test('list round-trips', async (t) => {
           sourceName: 'x',
           provider: 'stdout',
           filesTracked: 0,
+          filesDisabled: 0,
           disabled: false,
         },
       ],
@@ -95,6 +96,32 @@ test('list round-trips', async (t) => {
   const sources = await client.list();
   assert.equal(sources.length, 1);
   assert.equal(sources[0].id, 'rl_aaaaaa');
+  assert.equal(sources[0].filesTracked, 0);
+  assert.equal(sources[0].filesDisabled, 0);
+});
+
+test('list round-trips filesDisabled > 0', async (t) => {
+  const fs = await startFakeServer('list-disabled', () => ({
+    ok: true,
+    sources: [
+      {
+        id: 'rl_bbbbbb',
+        configPath: '/abs/relay.yaml',
+        sourceName: 'mixed',
+        provider: 'telegram',
+        groupId: -100,
+        filesTracked: 3,
+        filesDisabled: 2,
+        disabled: false,
+      },
+    ],
+  }));
+  t.after(() => fs.close());
+  const client = new RelayClient(fs.socketPath);
+  const sources = await client.list();
+  assert.equal(sources.length, 1);
+  assert.equal(sources[0].filesTracked, 3);
+  assert.equal(sources[0].filesDisabled, 2);
 });
 
 test('add passes configPath + dryRun through', async (t) => {

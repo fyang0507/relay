@@ -30,7 +30,11 @@ function sourceToKv(s: ListedSource): Array<[string, string]> {
     ['provider', s.provider],
   ];
   if (s.groupId !== undefined) kv.push(['group_id', String(s.groupId)]);
-  kv.push(['files_tracked', String(s.filesTracked)]);
+  const filesTracked =
+    s.filesDisabled > 0
+      ? `${s.filesTracked}  (${s.filesDisabled} disabled)`
+      : String(s.filesTracked);
+  kv.push(['files_tracked', filesTracked]);
   kv.push(['disabled', s.disabled ? 'yes' : 'no']);
   return kv;
 }

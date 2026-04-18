@@ -51,6 +51,7 @@ export interface ListedSource {
   provider: string;
   groupId?: number;
   filesTracked: number;
+  filesDisabled: number;
   disabled: boolean;
 }
 
@@ -224,14 +225,15 @@ export class Relay {
     for (const entry of this.state.listRegistry()) {
       const files = this.state.listSourcesByRelayId(entry.id);
       const filesTracked = files.length;
-      const disabled =
-        filesTracked > 0 && files.every((f) => f.state.disabled === true);
+      const filesDisabled = files.filter((f) => f.state.disabled === true).length;
+      const disabled = filesTracked > 0 && filesDisabled === filesTracked;
       const listed: ListedSource = {
         id: entry.id,
         configPath: entry.configPath,
         sourceName: entry.sourceConfig.name,
         provider: entry.sourceConfig.provider,
         filesTracked,
+        filesDisabled,
         disabled,
       };
       if (entry.sourceConfig.groupId !== undefined) {
