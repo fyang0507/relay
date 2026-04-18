@@ -6,7 +6,7 @@ A filesystem-watching daemon that mirrors agent JSONL logs to messaging platform
 
 ## Architecture at a glance
 
-Relay v1.0.0 ships as two binaries: a long-running daemon (`relayd`, supervised by macOS launchd) that holds a dynamic source registry, and a short-lived CLI (`relay`) that talks to it over a unix-domain socket at `~/.relay/sock`. Project configs are credential-free and registered at runtime via RPC — no static config file on the daemon side.
+Relay v1.1.0 ships as two binaries: a long-running daemon (`relayd`, supervised by macOS launchd) that holds a dynamic source registry, and a short-lived CLI (`relay`) that talks to it over a unix-domain socket at `~/.relay/sock`. Project configs are credential-free and registered at runtime via RPC — no static config file on the daemon side.
 
 File-by-file map (TypeScript, ESM, Node 20+):
 
