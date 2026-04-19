@@ -44,6 +44,8 @@ Relay is a passive mirror with a return channel. Outbound: new lines in watched 
 
     The field named by `tier_key` (default `type`) carries the inbound type — the first entry of `inbound_types` (default `"human_input"`). `timestamp` is ISO 8601 UTC when relay appended the line — agents use it on resume to detect lines written since their last action. `text` is the reply from Telegram. `source: "relay-inbound"` marks relay-authored lines so agent book-keeping readers can distinguish them.
 
+7. **(Optional) trim noisy payloads with `deliver_fields`.** If your JSONL lines carry scratch fields that are useful to the agent on resume but add noise on Telegram (trace ids, internal state, long transcripts), set a per-source `deliver_fields: [key1, key2, ...]` allowlist. Relay projects each outbound line to those top-level keys — ordered by the list, missing keys silently absent — before rendering. The `[<tier-key-value>]` header is unaffected, so you don't have to re-list the tier-key field. No nested paths: top-level keys only. Because the filter is source-wide, sources emitting multiple line shapes need a union that covers all of them. Add `deliver_field_max_chars: N` (integer in `[20, 4096]`, only valid alongside `deliver_fields`) to cap each projected field individually — strings over the cap truncate to `N-3` chars + `...`; non-string values over the cap are replaced with their truncated JSON-stringified form. Per-field (not per-message) so one oversize field cannot starve the rest. Filesystem JSONL is unaffected either way — filtering is a delivery-side concern.
+
 ## Example: a minimal config
 
 ```yaml
@@ -53,6 +55,9 @@ sources:
     path_glob: ~/outreach-data/outreach/campaigns/*.jsonl
     # tier_key: type   # override if your agents already use a different field name
     inbound_types: [human_input]
+    # Optional: allowlist top-level keys to deliver (omit to deliver the full payload).
+    # deliver_fields: [tool, args, notes]
+    # deliver_field_max_chars: 500   # only valid alongside deliver_fields
     tiers:
       call.placed: silent
       call.outcome: notify

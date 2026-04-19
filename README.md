@@ -41,6 +41,10 @@ Stop and uninstall:
 relay shutdown       # unloads launchd agent; preserves ~/.relay/ state
 ```
 
+## Trimming delivered payloads
+
+JSONL lines often carry scratch fields that are useful to the agent on resume but noisy on Telegram. Per-source `deliver_fields: [key1, key2, ...]` projects each outbound line to that top-level allowlist (ordered by the list, missing keys silently absent); the `[<tier-key>]` header is unaffected. Add `deliver_field_max_chars: N` (integer in `[20, 4096]`, only valid alongside `deliver_fields`) to cap each projected field individually — strings over the cap truncate with `...`; non-strings over the cap are replaced with their truncated JSON-stringified form. Filtering is delivery-only; the filesystem JSONL is unaffected. See `skills/relay-integration/SKILL.md` for the full schema.
+
 ## Pointers
 
 - `relay.md` — architecture, design principles, provider contract, deferred scope.
