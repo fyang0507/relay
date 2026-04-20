@@ -40,16 +40,39 @@ export interface RegistryEntry {
   addedAt: string;             // ISO 8601 UTC
 }
 
-// On-disk shape (schema v3). `version` lets us reject stale state files.
-// v3 bump (#6): the registry stores `RegistryEntry.sourceConfig`, whose
-// shape changed (provider settings moved to a nested `provider:` block).
-// We reject v1/v2 state with a clear message and require operators to
-// clear `~/.relay/state.json` and re-register.
+// Per-file destination mapping that outlived its registry entry. Produced by
+// `removeRegistry` instead of a hard delete of the matching `sources[filePath]`
+// entries, so a later `relay add` against the same files can rehydrate the
+// existing destination (e.g. Telegram forum topic) instead of provisioning a
+// fresh one and orphaning the old. See GH #14. Keyed by `filePath` in the
+// top-level `orphaned` section.
+//
+// `providerType` is captured at archive time so rehydration only matches when
+// the re-registered source uses the same provider — a stdout-source replacing
+// a telegram-source (or vice versa) is a genuine config change and should
+// provision fresh rather than recycling an address that belongs to a
+// different platform.
+export interface OrphanEntry {
+  filePath: string;
+  sourceName: string;
+  providerType: string;
+  destination: Destination;
+  destinationKey: string;
+  offset: number;
+  archivedAt: string;
+}
+
+// On-disk shape (schema v4). `version` lets us reject stale state files.
+// v3 → v4 (GH #14): additive — adds the `orphaned` section. v3 state files
+// are upgraded seamlessly on load (missing `orphaned` becomes `{}`); no
+// operator action required. v1/v2 are still rejected loudly because their
+// registry / sourceConfig shapes differ.
 export interface RelayStateShape {
-  version: 3;
+  version: 4;
   sources: Record<string, SourceState>;
   providers: Record<string, Record<string, unknown>>;
   registry: Record<string, RegistryEntry>;
+  orphaned: Record<string, OrphanEntry>;
 }
 
 const DEFAULT_STATE_PATH = path.join(os.homedir(), '.relay', 'state.json');
@@ -63,7 +86,7 @@ function expandHome(p: string): string {
 }
 
 function freshState(): RelayStateShape {
-  return { version: 3, sources: {}, providers: {}, registry: {} };
+  return { version: 4, sources: {}, providers: {}, registry: {}, orphaned: {} };
 }
 
 export class RelayState {
@@ -85,25 +108,34 @@ export class RelayState {
     let data: RelayStateShape;
     try {
       const raw = await fs.readFile(resolved, 'utf8');
-      const parsed = JSON.parse(raw) as Partial<RelayStateShape> & {
+      // `version` on disk may be 3 (legacy, auto-upgraded) or 4 (current).
+      // We type it loosely so the narrow v4 type on RelayStateShape doesn't
+      // reject the legacy branch at compile time.
+      const parsed = JSON.parse(raw) as {
         version?: number;
+        sources?: RelayStateShape['sources'];
+        providers?: RelayStateShape['providers'];
+        registry?: RelayStateShape['registry'];
+        orphaned?: RelayStateShape['orphaned'];
       };
-      // Reject any state file that isn't v3. No auto-migration — operators
-      // must clear the file and re-register sources.
-      if (parsed.version !== 3) {
+      // v4 is current. v3 is upgraded seamlessly (GH #14 added `orphaned`
+      // additively; no registry reshape). v1 and v2 are rejected loudly —
+      // their registry / sourceConfig shapes are incompatible.
+      if (parsed.version !== 3 && parsed.version !== 4) {
         throw new Error(
-          `State file at ${resolved} is v${parsed.version ?? '<unknown>'}; this relay requires v3. Remove the file and re-register sources (schema v3 moves provider settings under a nested \`provider:\` block; see relay.md §Configuration schema).`,
+          `State file at ${resolved} is v${parsed.version ?? '<unknown>'}; this relay requires v4 (v3 is auto-upgraded). Remove the file and re-register sources (schema v3 moved provider settings under a nested \`provider:\` block; v4 added a per-file destination archive — see relay.md §Configuration schema).`,
         );
       }
       data = {
-        version: 3,
+        version: 4,
         sources: parsed.sources ?? {},
         providers: parsed.providers ?? {},
         registry: parsed.registry ?? {},
+        orphaned: parsed.orphaned ?? {},
       };
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
-        // Fresh state. Treated as v3 from the start.
+        // Fresh state. Treated as v4 from the start.
         data = freshState();
       } else {
         throw err;
@@ -185,20 +217,85 @@ export class RelayState {
     this.scheduleSave();
   }
 
-  // Remove a registry entry. Cascades: also drops every sources[filePath]
-  // whose `relayId === id`. Returns the removed entry, or undefined if none.
+  // Remove a registry entry. Cascades: moves every sources[filePath] whose
+  // `relayId === id` into the `orphaned` archive (keyed by filePath) instead
+  // of dropping it outright, so a later `relay add` against the same files
+  // can rehydrate the provisioned destination rather than duplicating it
+  // (GH #14). Returns the removed entry, or undefined if none.
+  //
+  // We key the archive by filePath alone (a path uniquely identifies a file
+  // on disk) and stamp the providerType from the registry entry being
+  // removed so rehydration can require a matching provider. If a prior
+  // orphan exists for the same filePath (e.g. a rapid remove/re-add/remove
+  // cycle against the same file) we overwrite it — the most recent
+  // destination is the one still live on the messaging platform.
   removeRegistry(id: string): RegistryEntry | undefined {
     const existing = this.data.registry[id];
     if (!existing) return undefined;
+    const providerType = existing.sourceConfig.provider.type;
     delete this.data.registry[id];
-    // Cascade.
-    for (const [filePath, state] of Object.entries(this.data.sources)) {
-      if (state.relayId === id) {
-        delete this.data.sources[filePath];
+    // Cascade: archive instead of delete.
+    const archivedAt = new Date().toISOString();
+    for (const [filePath, src] of Object.entries(this.data.sources)) {
+      if (src.relayId !== id) continue;
+      // Archive unless disabled — a disabled mapping means the provider
+      // already rejected the destination (topic deleted, thread gone), so
+      // there is nothing useful to rehydrate. Drop it.
+      if (!src.disabled) {
+        this.data.orphaned[filePath] = {
+          filePath,
+          sourceName: src.sourceName,
+          providerType,
+          destination: src.destination,
+          destinationKey: src.destinationKey,
+          offset: src.offset,
+          archivedAt,
+        };
       }
+      delete this.data.sources[filePath];
     }
     this.scheduleSave();
     return existing;
+  }
+
+  // ---- orphan archive (v4, GH #14) ----------------------------------------
+
+  listOrphaned(): OrphanEntry[] {
+    return Object.values(this.data.orphaned).map((o) => ({ ...o }));
+  }
+
+  getOrphan(filePath: string): OrphanEntry | undefined {
+    const o = this.data.orphaned[filePath];
+    return o ? { ...o } : undefined;
+  }
+
+  // Atomic rehydrate: if an archived destination for `filePath` matches the
+  // incoming `sourceName` AND `providerType`, remove it from the archive and
+  // return it so the caller can resume tailing without re-provisioning.
+  // A mismatch leaves the orphan in place — a future matching re-register
+  // can still pick it up.
+  takeOrphan(
+    filePath: string,
+    sourceName: string,
+    providerType: string,
+  ): OrphanEntry | undefined {
+    const o = this.data.orphaned[filePath];
+    if (!o) return undefined;
+    if (o.sourceName !== sourceName) return undefined;
+    if (o.providerType !== providerType) return undefined;
+    delete this.data.orphaned[filePath];
+    this.scheduleSave();
+    return { ...o };
+  }
+
+  // Drop an archived mapping unconditionally. Exposed so operators (and a
+  // future `relay prune` command) can force a clean slate without editing
+  // state.json by hand.
+  clearOrphan(filePath: string): boolean {
+    if (!(filePath in this.data.orphaned)) return false;
+    delete this.data.orphaned[filePath];
+    this.scheduleSave();
+    return true;
   }
 
   listRegistry(): RegistryEntry[] {

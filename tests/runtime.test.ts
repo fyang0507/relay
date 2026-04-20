@@ -12,7 +12,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 
-import { Relay, buildResolveSource } from '../src/runtime.ts';
+import { Relay, SourceNameConflictError, buildResolveSource } from '../src/runtime.ts';
 import { RelayDispatcher } from '../src/dispatch.ts';
 import { RelayState } from '../src/state.ts';
 import { RelayWatcher } from '../src/watch.ts';
@@ -187,10 +187,46 @@ test('addSource is idempotent by (configPath, sourceConfig.name)', async (t) => 
   const listed = state.listRegistry();
   assert.equal(listed.length, 1);
 
-  // A different configPath with the same source name is considered distinct.
-  const id3 = await relay.addSource(source, '/conf/other.yaml');
-  assert.notEqual(id1, id3);
-  assert.equal(state.listRegistry().length, 2);
+  await relay.stop();
+});
+
+test('addSource rejects same name under a different configPath (GH #15)', async (t) => {
+  const dir = await mkTmpDir('name-conflict');
+  t.after(() => fsp.rm(dir, { recursive: true, force: true }));
+  const statePath = path.join(dir, 'state.json');
+  await fsp.writeFile(path.join(dir, 'a.jsonl'), '');
+
+  const state = await RelayState.load(statePath);
+  const provider = new StubProvider();
+  const source = makeSource(dir, { name: 'shared' });
+
+  const { relay } = buildRuntime(state, provider);
+  await relay.start();
+
+  const id1 = await relay.addSource(source, '/conf/a.yaml');
+
+  // Same source name, different configPath — must throw rather than
+  // silently registering a ghost entry whose watcher was no-op'd because
+  // the watcher layer keys on source name alone.
+  await assert.rejects(
+    () => relay.addSource(source, '/conf/b.yaml'),
+    (err: unknown) => {
+      assert.ok(err instanceof SourceNameConflictError);
+      const cast = err as SourceNameConflictError;
+      assert.equal(cast.code, 'name_conflict');
+      assert.equal(cast.existingId, id1);
+      assert.equal(cast.existingConfigPath, '/conf/a.yaml');
+      assert.equal(cast.sourceName, 'shared');
+      assert.match(cast.message, /already registered/);
+      return true;
+    },
+  );
+
+  // Registry is untouched — still a single entry, pointing at the first
+  // configPath.
+  const listed = state.listRegistry();
+  assert.equal(listed.length, 1);
+  assert.equal(listed[0].configPath, '/conf/a.yaml');
 
   await relay.stop();
 });
@@ -515,6 +551,124 @@ test('file created after addSource: first line is delivered (GH #4)', async (t) 
     `expected the first line to reach deliver(); saw ${JSON.stringify(delivered)}`,
   );
   assert.match(delivered[0].text, /first/);
+
+  await relay.stop();
+});
+
+test('remove + re-add rehydrates archived destination (GH #14)', async (t) => {
+  // Regression for GitHub #14. The first `addSource` provisions a destination
+  // for the pre-existing file. After `removeSource`, the per-file mapping is
+  // archived in `orphaned` rather than dropped. A subsequent `addSource`
+  // against a config pointing at the same file must reuse the archived
+  // destination instead of calling `provision` again.
+  const dir = await mkTmpDir('rehydrate');
+  t.after(() => fsp.rm(dir, { recursive: true, force: true }));
+  const statePath = path.join(dir, 'state.json');
+
+  const filePath = path.join(dir, 'persist.jsonl');
+  await fsp.writeFile(filePath, '');
+
+  const state = await RelayState.load(statePath);
+  const provider = new StubProvider();
+  const { relay } = buildRuntime(state, provider);
+  await relay.start();
+
+  const id1 = await relay.addSource(
+    makeSource(dir, { name: 'rehydrate-src' }),
+    '/conf/a.yaml',
+  );
+  await delay(SETTLE_MS);
+  assert.equal(provider.provisionCalls.length, 1, 'initial provision');
+  const firstSourceState = state.getSource(filePath);
+  assert.ok(firstSourceState);
+  const firstDestKey = firstSourceState.destinationKey;
+  const firstOffset = firstSourceState.offset;
+
+  // Remove: per-file mapping should move into the orphan archive.
+  await relay.removeSource(id1);
+  assert.equal(state.getSource(filePath), undefined);
+  const orphan = state.getOrphan(filePath);
+  assert.ok(orphan, 'removed mapping must be archived for rehydration');
+  assert.equal(orphan.destinationKey, firstDestKey);
+  assert.equal(orphan.offset, firstOffset);
+
+  // Re-register under a *different* configPath. The source name and provider
+  // type match, so rehydration should kick in.
+  const id2 = await relay.addSource(
+    makeSource(dir, { name: 'rehydrate-src' }),
+    '/conf/b.yaml',
+  );
+  await delay(SETTLE_MS);
+
+  assert.notEqual(id2, id1, 'new registry entry has fresh id');
+  assert.equal(
+    provider.provisionCalls.length,
+    1,
+    'rehydrate path must NOT call provision again',
+  );
+  const rehydrated = state.getSource(filePath);
+  assert.ok(rehydrated, 'file tracked after re-add');
+  assert.equal(rehydrated.destinationKey, firstDestKey, 'destination reused');
+  assert.equal(rehydrated.offset, firstOffset, 'offset reused');
+  assert.equal(rehydrated.relayId, id2, 'stamped with the new relayId');
+  // Orphan was consumed.
+  assert.equal(state.getOrphan(filePath), undefined);
+
+  await relay.stop();
+});
+
+test('re-add with a different provider type does NOT rehydrate', async (t) => {
+  // Safety check: if an operator changes the provider type between remove and
+  // re-add, we must not recycle an address belonging to a different platform.
+  const dir = await mkTmpDir('rehydrate-mismatch');
+  t.after(() => fsp.rm(dir, { recursive: true, force: true }));
+  const statePath = path.join(dir, 'state.json');
+
+  const filePath = path.join(dir, 'persist.jsonl');
+  await fsp.writeFile(filePath, '');
+
+  const state = await RelayState.load(statePath);
+
+  // Manually plant an orphan under providerType 'telegram' so we can
+  // observe that a 'stdout'-typed re-add ignores it.
+  state.setSource(filePath, {
+    sourceName: 'mismatch-src',
+    relayId: 'rl_stale0',
+    offset: 99,
+    destination: { chatId: -100, topicId: 5 },
+    destinationKey: '-100:5',
+  });
+  state.addRegistry({
+    id: 'rl_stale0',
+    configPath: '/conf/stale.yaml',
+    sourceConfig: {
+      name: 'mismatch-src',
+      pathGlob: path.join(dir, '*.jsonl'),
+      provider: { type: 'telegram', groupId: -100 },
+      inboundTypes: ['human_input'],
+      tiers: {},
+    },
+    addedAt: new Date().toISOString(),
+  });
+  state.removeRegistry('rl_stale0');
+  assert.ok(state.getOrphan(filePath), 'sanity: orphan is present');
+
+  const provider = new StubProvider(); // stdout provider
+  const { relay } = buildRuntime(state, provider);
+  await relay.start();
+  await relay.addSource(
+    makeSource(dir, { name: 'mismatch-src' }), // provider.type === 'stdout'
+    '/conf/new.yaml',
+  );
+  await delay(SETTLE_MS);
+
+  assert.equal(
+    provider.provisionCalls.length,
+    1,
+    'mismatched providerType must fall through to provision',
+  );
+  // Orphan stays put — a future telegram re-add can still pick it up.
+  assert.ok(state.getOrphan(filePath), 'orphan preserved on provider mismatch');
 
   await relay.stop();
 });

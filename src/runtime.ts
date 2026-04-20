@@ -42,6 +42,33 @@ export interface RelayConstructorOpts {
   options?: RelayOptions;
 }
 
+// Thrown by `Relay.addSource` when the incoming source name collides with an
+// existing registry entry owned by a *different* configPath. The watcher keys
+// by `sourceConfig.name` alone (see `src/watch.ts` addSource), so allowing
+// two registry entries with the same name but different configPaths created
+// a "ghost" source: the second entry is registered but never gets a live
+// watcher, and a later `remove` of the first silently strips the shared
+// watcher — see GH #15. We fail fast here at registration time instead.
+export class SourceNameConflictError extends Error {
+  readonly code = 'name_conflict' as const;
+  readonly existingId: string;
+  readonly existingConfigPath: string;
+  readonly sourceName: string;
+  constructor(opts: {
+    sourceName: string;
+    existingId: string;
+    existingConfigPath: string;
+  }) {
+    super(
+      `source name "${opts.sourceName}" is already registered under id ${opts.existingId} at configPath ${opts.existingConfigPath}; remove it first or pick a different name`,
+    );
+    this.name = 'SourceNameConflictError';
+    this.existingId = opts.existingId;
+    this.existingConfigPath = opts.existingConfigPath;
+    this.sourceName = opts.sourceName;
+  }
+}
+
 // Flat projection of a live registered source for CLI consumption (P4).
 // Phase 2: the old `group` (named reference) is gone; we expose `groupId`
 // directly when the source has one (telegram sources always will).
@@ -169,17 +196,33 @@ export class Relay {
   // watcher. Otherwise generates a fresh `rl_xxx` id, persists the
   // registry entry, and attaches the source to the watcher (which will
   // begin emitting 'fileDiscovered').
+  //
+  // Throws `SourceNameConflictError` if another registry entry already owns
+  // this `sourceConfig.name` under a *different* configPath. See GH #15:
+  // the watcher keys by source name alone and would no-op the second entry,
+  // leaving a ghost source with no backing file watcher.
   async addSource(
     sourceConfig: SourceConfig,
     configPath: string,
   ): Promise<string> {
-    const existing = this.state
-      .listRegistry()
-      .find(
-        (e) =>
-          e.configPath === configPath && e.sourceConfig.name === sourceConfig.name,
-      );
-    if (existing) return existing.id;
+    let samePairMatch: RegistryEntry | undefined;
+    let nameConflict: RegistryEntry | undefined;
+    for (const e of this.state.listRegistry()) {
+      if (e.sourceConfig.name !== sourceConfig.name) continue;
+      if (e.configPath === configPath) {
+        samePairMatch = e;
+        break;
+      }
+      nameConflict = e;
+    }
+    if (samePairMatch) return samePairMatch.id;
+    if (nameConflict) {
+      throw new SourceNameConflictError({
+        sourceName: sourceConfig.name,
+        existingId: nameConflict.id,
+        existingConfigPath: nameConflict.configPath,
+      });
+    }
 
     const id = this.state.generateRelayId();
     const entry: RegistryEntry = {
@@ -291,7 +334,28 @@ export class Relay {
       return;
     }
 
-    // Fresh file — provision a destination.
+    // Fresh file from this runtime's perspective. Before calling the
+    // provider, check whether a prior registration left behind a per-file
+    // destination in the orphan archive (GH #14). If so, rehydrate in
+    // place: reuse the destination + offset, skip provision, avoid
+    // duplicating platform artifacts (e.g. Telegram forum topics).
+    const archived = this.state.takeOrphan(
+      filePath,
+      sourceName,
+      source.provider.type,
+    );
+    if (archived) {
+      this.state.setSource(filePath, {
+        sourceName,
+        relayId: entry.id,
+        offset: archived.offset,
+        destination: archived.destination,
+        destinationKey: archived.destinationKey,
+      });
+      this.watcher.trackFile(filePath, archived.offset, sourceName);
+      return;
+    }
+
     const provider = this.providers.get(source.provider.type);
     if (!provider) {
       console.warn(

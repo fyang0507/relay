@@ -95,6 +95,28 @@ Watch registrations are persisted in relay's own registry at `~/.relay/state.jso
 
 For the outreach-campaigns flow specifically, relay ships a canonical source template at `examples/outreach-source.yaml` (in the relay repo). Copy it into your data repo as `relay.config.yaml`, substitute `<DATA_REPO_PATH>` and `<GROUP_ID>`, and register it. Outreach's repo does not carry its own copy — relay owns the template so it can evolve with the integration contract.
 
+### What to expect after `relay add` (file-discovery semantics)
+
+After a successful `relay add`, `files_tracked: 0` is **transient**. Relay's directory watcher does an initial scan of `path_glob`; each matching file flows through `fileDiscovered → provision → trackFile`, bumping `files_tracked`. For small directories this is sub-second; bulk provisioning against Telegram can take longer because topic creation is rate-limited (429s retry with backoff).
+
+- **Pre-existing files** (present when the watcher starts) go through the same provision path as newly-written ones. The default starting offset is `stat.size` (mark-as-read — don't replay history); set `backfill: true` on the source to start at offset 0 instead. There is no "skip the first line" mode.
+- **Files created after `relay add`** start at offset 0 unconditionally so the creating write is not lost to a stat-size race.
+- **`files_tracked` stays 0 indefinitely** → something went wrong. Check `~/.relay/daemon.err.log` for provision failures. **Watch log freshness**: the `.err.log` is not rotated on daemon restart, so `tail -f` or `stat` the file's mtime before blaming current events on old entries.
+- **Source-name uniqueness is enforced across configPaths.** Registering the same `sources[].name` under a different `relay.config.yaml` returns `name_conflict` with a remediation hint (remove the existing id or pick a different name). Source names are the daemon's per-source identifier — they must be unique.
+
+### Re-registering a previously-watched directory
+
+`relay remove` drops the registry entry and the runtime watchers, but **archives** the per-file destination mappings (provider, topic id, offset) into `~/.relay/state.json` → `orphaned`. A later `relay add` against a config whose source produces the same `(filePath, sourceName, providerType)` **rehydrates** the archived destination — no duplicate Telegram topics, no offset reset. This makes `remove + add` the idempotent path for migrating a config between directories, renaming a config file, or changing source-definition fields that aren't hot-reloadable.
+
+Consequences:
+
+- Changing `sourceName` between remove and re-add is treated as a different source — rehydration is skipped, the old orphan stays archived, and a fresh destination is provisioned. If that's unintended, match the old name.
+- Changing `provider.type` similarly skips rehydration (recycling a Telegram topic id as, say, a stdout destination would be meaningless).
+- A destination deleted in the platform's UI between remove and re-add will surface through the normal "destination gone → disable mapping" path on the first outbound deliver.
+- `disabled` mappings (provider already reported the destination gone) are **not** archived on remove — there is nothing useful to rehydrate.
+
+For a genuinely clean slate, delete the Telegram topics in the UI and clear the `orphaned` section of `state.json` manually.
+
 ## Example: a minimal config
 
 ```yaml
@@ -138,7 +160,7 @@ Each new JSONL file matching `path_glob` provisions a Telegram forum topic named
 - **One-time per machine**: `relay init` in the relay checkout. This installs `~/Library/LaunchAgents/com.fyang0507.relay.plist` and starts the daemon via `launchctl bootstrap`. The daemon stays up across logouts and reboots.
 - **One-time per data repo**: `relay setup --data-repo <path>`. Stamps `tools.relay` in `.agents/workspace.yaml` and syncs skill docs to `<data_repo>/.agents/skills/relay/`. Idempotent and order-independent with `outreach setup` / `sundial setup`.
 - **Per project**: `relay add --config /abs/path/to/relay.config.yaml` (idempotent). `relay list` to see what's registered. `relay remove --id rl_xxxxxx` to unregister a source; `--dry-run` is available on both `add` and `remove`.
-- **`remove` does not touch provider artifacts.** Unregistering a source stops watching its files and drops its state locally, but relay intentionally does not delete the Telegram topics it created — the messaging platform is treated as a durable archive the operator owns. Delete topics manually in the Telegram UI if you want a clean slate.
+- **`remove` does not touch provider artifacts.** Unregistering a source stops watching its files; the Telegram topics it created stay in the group (messaging is a durable archive the operator owns). Per-file destination mappings are archived in `~/.relay/state.json` → `orphaned` so a later `relay add` against the same files rehydrates the existing topics instead of duplicating them. For a genuinely clean slate, delete the Telegram topics manually and clear `orphaned` from `state.json`.
 - **Quick checks**: `relay health` (daemon liveness + uptime + registered count).
 - **Uninstall**: `relay shutdown` unloads the launchd agent and removes the plist. `~/.relay/` (state + logs) is preserved; `rm -rf ~/.relay` for a full wipe.
 - **Node binary moved** (nvm switch, Homebrew upgrade): the plist hardcodes `process.execPath` at install time, so re-run `relay init` after any change to your node install.

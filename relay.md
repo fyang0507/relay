@@ -1,7 +1,7 @@
 # Relay — Agent-to-Human Observability Layer
 
 Issue: #67 (outreach-side integration)
-Status: v1.2.0 shipped. This doc is the living design reference — where the code and the doc disagree, the code wins and the doc gets updated. See the "v1.0.0 delivered" note under *Implementation phases* for what shipped in the initial release; smaller follow-ons (field filtering, nested provider schema, per-data-repo `relay setup` command, etc.) have landed on top of that.
+Status: v1.3.0 shipped. This doc is the living design reference — where the code and the doc disagree, the code wins and the doc gets updated. See the "v1.0.0 delivered" note under *Implementation phases* for what shipped in the initial release; smaller follow-ons (field filtering, nested provider schema, per-data-repo `relay setup` command, etc.) have landed on top of that.
 
 ## Problem
 
@@ -151,7 +151,7 @@ Relay ships a `SKILL.md` documenting this contract so consumers know what to emi
 
 On daemon start (launchd brings `relayd` up automatically; the flow below is identical whether via `relay init` or a fresh login):
 
-1. Load state (`~/.relay/state.json`, schema v2) and credentials (relay repo `.env`).
+1. Load state (`~/.relay/state.json`, schema v4) and credentials (relay repo `.env`).
 2. Build the provider map. Stdout is always available; Telegram registers iff credentials are present.
 3. Start the dispatcher (inbound loops go live) and the base watcher.
 4. **Replay the registry**: for each persisted `registry` entry, re-attach its source to the watcher. Pre-existing files are rediscovered and, if already tracked in state, resumed from the stored offset.
@@ -166,7 +166,11 @@ Default offset on first discovery: **create topic, skip to EOF** (treat existing
 
 Telegram inbound cursor (`update_id`) persists separately in the provider bag so relay never reprocesses old replies on restart.
 
-When an operator runs `relay add --config ...`, each source in that config goes through the same discovery path without a daemon restart. `relay remove --id rl_xxx` detaches the directory watcher, untracks tailing, drops the registry entry, and cascades to every `sources[filePath]` whose `relayId` matches.
+When an operator runs `relay add --config ...`, each source in that config goes through the same discovery path without a daemon restart. `relay remove --id rl_xxx` detaches the directory watcher, untracks tailing, drops the registry entry, and cascades every `sources[filePath]` whose `relayId` matches into a per-file orphan archive (`orphaned` section of `state.json`, keyed by filePath, stamped with `sourceName`, `providerType`, `destination`, `destinationKey`, `offset`, `archivedAt`). A disabled mapping — the provider has already reported its destination gone — is dropped instead of archived, since rehydrating a dead handle is pointless.
+
+On a subsequent `relay add` against a config pointing at the same file, `handleFileDiscovered` consults the archive before calling `provider.provision`: if an orphan's `(sourceName, providerType)` match the incoming source, relay rehydrates in place — reusing the destination and offset, skipping provision, avoiding duplicate platform artifacts (e.g. Telegram forum topics). A mismatch leaves the orphan in place; a future matching re-register can still pick it up. If the destination has meanwhile been deleted on the viewer side, the first outbound deliver hits the existing "destination gone → disable mapping" path and nothing else changes.
+
+`addSource` enforces a name-as-unique-key invariant across configPaths: a second registration with the same `sourceConfig.name` but a different `configPath` throws `SourceNameConflictError` (`code: 'name_conflict'`) and the socket surfaces it to the CLI. The watcher layer keys its directory watchers by source name alone, so allowing two registry entries to share a name would leave one of them without a backing watcher (GH #15).
 
 ## Viewer-side reconciliation
 

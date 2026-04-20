@@ -57,10 +57,11 @@ test('load returns fresh state when file is missing', async () => {
   const p = await mkTmpStatePath('missing');
   const s = await RelayState.load(p);
   const snap = s._snapshot();
-  assert.equal(snap.version, 3);
+  assert.equal(snap.version, 4);
   assert.deepEqual(snap.sources, {});
   assert.deepEqual(snap.providers, {});
   assert.deepEqual(snap.registry, {});
+  assert.deepEqual(snap.orphaned, {});
 
   // File should NOT have been created by load.
   await assert.rejects(fs.stat(p), (err: NodeJS.ErrnoException) => err.code === 'ENOENT');
@@ -75,7 +76,7 @@ test('load rejects a v1 state file with a clear message', async () => {
   );
   await assert.rejects(
     () => RelayState.load(p),
-    /is v1; this relay requires v3\./,
+    /is v1; this relay requires v4/,
   );
 });
 
@@ -88,7 +89,7 @@ test('load rejects a v2 state file with a clear message (#6 schema bump)', async
   );
   await assert.rejects(
     () => RelayState.load(p),
-    /is v2; this relay requires v3\./,
+    /is v2; this relay requires v4/,
   );
 });
 
@@ -96,10 +97,33 @@ test('load rejects a state file with unknown version', async () => {
   const p = await mkTmpStatePath('vx-rejected');
   await fs.mkdir(path.dirname(p), { recursive: true });
   await fs.writeFile(p, JSON.stringify({ version: 99, sources: {} }));
-  await assert.rejects(() => RelayState.load(p), /requires v3/);
+  await assert.rejects(() => RelayState.load(p), /requires v4/);
 });
 
-test('save + load round-trips state shape (v3)', async () => {
+test('load upgrades a v3 state file in place (GH #14 additive schema bump)', async () => {
+  const p = await mkTmpStatePath('v3-upgrade');
+  await fs.mkdir(path.dirname(p), { recursive: true });
+  // v3 file with real registry + sources content. Must survive the bump.
+  const before = {
+    version: 3,
+    sources: {
+      '/abs/a.jsonl': makeSourceState({ relayId: 'rl_aaaaaa' }),
+    },
+    providers: { telegram: { telegramUpdateIdCursor: 111 } },
+    registry: { rl_aaaaaa: makeRegistryEntry('rl_aaaaaa') },
+  };
+  await fs.writeFile(p, JSON.stringify(before));
+
+  const s = await RelayState.load(p);
+  const snap = s._snapshot();
+  assert.equal(snap.version, 4, 'loader must upgrade to v4');
+  assert.deepEqual(snap.orphaned, {}, 'orphaned defaults to empty');
+  assert.ok(snap.sources['/abs/a.jsonl'], 'sources preserved');
+  assert.equal(snap.providers.telegram?.telegramUpdateIdCursor, 111);
+  assert.ok(snap.registry['rl_aaaaaa']);
+});
+
+test('save + load round-trips state shape (v4)', async () => {
   const p = await mkTmpStatePath('roundtrip');
   const s1 = await RelayState.load(p);
 
@@ -117,7 +141,7 @@ test('save + load round-trips state shape (v3)', async () => {
 
   const s2 = await RelayState.load(p);
   const snap = s2._snapshot();
-  assert.equal(snap.version, 3);
+  assert.equal(snap.version, 4);
   assert.deepEqual(snap.sources['/abs/path/to/file.jsonl'], src);
   assert.equal(snap.providers.telegram?.telegramUpdateIdCursor, 987654);
   assert.equal(snap.providers.telegram?.extra, 'hello');
@@ -210,7 +234,7 @@ test('concurrent saves serialize without corrupting the file', async () => {
   // File must parse as valid JSON and contain the final state.
   const raw = await fs.readFile(p, 'utf8');
   const parsed = JSON.parse(raw);
-  assert.equal(parsed.version, 3);
+  assert.equal(parsed.version, 4);
   for (let i = 0; i < 20; i++) {
     assert.equal(parsed.sources[`/files/f${i}.jsonl`].offset, i);
   }
@@ -271,7 +295,7 @@ test('addRegistry + listRegistry + getRegistry round-trip', async () => {
   await s.flush();
 });
 
-test('removeRegistry cascades: drops sources with matching relayId', async () => {
+test('removeRegistry cascades: archives sources with matching relayId (GH #14)', async () => {
   const p = await mkTmpStatePath('registry-cascade');
   const s = await RelayState.load(p);
 
@@ -282,8 +306,12 @@ test('removeRegistry cascades: drops sources with matching relayId', async () =>
     sourceConfig: makeSourceConfig({ name: 'other' }),
   }));
   // Two files under A, one under B.
-  s.setSource('/a/1.jsonl', makeSourceState({ relayId: idA }));
-  s.setSource('/a/2.jsonl', makeSourceState({ relayId: idA, destinationKey: 'k2' }));
+  s.setSource('/a/1.jsonl', makeSourceState({ relayId: idA, offset: 11 }));
+  s.setSource('/a/2.jsonl', makeSourceState({
+    relayId: idA,
+    destinationKey: 'k2',
+    offset: 22,
+  }));
   s.setSource('/b/1.jsonl', makeSourceState({ relayId: idB, destinationKey: 'k3' }));
 
   const removed = s.removeRegistry(idA);
@@ -294,12 +322,96 @@ test('removeRegistry cascades: drops sources with matching relayId', async () =>
   assert.equal(s.getRegistry(idA), undefined);
   assert.ok(s.getRegistry(idB));
 
-  // Both /a files gone; /b file remains.
+  // Both /a entries removed from the live sources map.
   assert.equal(s.getSource('/a/1.jsonl'), undefined);
   assert.equal(s.getSource('/a/2.jsonl'), undefined);
   assert.ok(s.getSource('/b/1.jsonl'));
 
+  // ...but both /a entries should now live in the orphan archive with
+  // their destinations preserved for rehydration on a later re-add.
+  const orphan1 = s.getOrphan('/a/1.jsonl');
+  const orphan2 = s.getOrphan('/a/2.jsonl');
+  assert.ok(orphan1, '/a/1 archived');
+  assert.ok(orphan2, '/a/2 archived');
+  assert.equal(orphan1!.offset, 11);
+  assert.equal(orphan2!.offset, 22);
+  assert.equal(orphan1!.providerType, 'telegram');
+  assert.equal(orphan1!.sourceName, 'outreach-campaigns');
+  // /b should not have been archived.
+  assert.equal(s.getOrphan('/b/1.jsonl'), undefined);
+
   await s.flush();
+});
+
+test('removeRegistry cascade drops disabled mappings instead of archiving', async () => {
+  // A `disabled` mapping means the provider already reported the destination
+  // gone (e.g. Telegram 400 "message thread not found"). Rehydrating that
+  // destination would just hit the same dead handle, so we drop rather than
+  // archive.
+  const p = await mkTmpStatePath('registry-disabled-drop');
+  const s = await RelayState.load(p);
+
+  const id = 'rl_cccccc';
+  s.addRegistry(makeRegistryEntry(id));
+  s.setSource('/x/1.jsonl', makeSourceState({ relayId: id }));
+  s.setSource('/x/2.jsonl', makeSourceState({
+    relayId: id,
+    destinationKey: 'k-dead',
+    disabled: true,
+    disabledReason: 'topic gone',
+  }));
+
+  s.removeRegistry(id);
+  assert.ok(s.getOrphan('/x/1.jsonl'), 'live mapping archived');
+  assert.equal(s.getOrphan('/x/2.jsonl'), undefined, 'disabled mapping dropped');
+});
+
+test('takeOrphan matches by (filePath, sourceName, providerType) and removes', async () => {
+  const p = await mkTmpStatePath('takeOrphan');
+  const s = await RelayState.load(p);
+
+  const id = 'rl_dddddd';
+  s.addRegistry(makeRegistryEntry(id));
+  s.setSource('/z/1.jsonl', makeSourceState({ relayId: id, offset: 42 }));
+  s.removeRegistry(id);
+
+  // Wrong source name → no match, orphan preserved.
+  assert.equal(s.takeOrphan('/z/1.jsonl', 'wrong', 'telegram'), undefined);
+  assert.ok(s.getOrphan('/z/1.jsonl'), 'orphan preserved on mismatched name');
+
+  // Wrong provider type → no match.
+  assert.equal(
+    s.takeOrphan('/z/1.jsonl', 'outreach-campaigns', 'stdout'),
+    undefined,
+  );
+  assert.ok(s.getOrphan('/z/1.jsonl'), 'orphan preserved on mismatched provider');
+
+  // Correct pair → returns entry and removes.
+  const taken = s.takeOrphan('/z/1.jsonl', 'outreach-campaigns', 'telegram');
+  assert.ok(taken);
+  assert.equal(taken.offset, 42);
+  assert.equal(s.getOrphan('/z/1.jsonl'), undefined);
+
+  // Second take is a miss.
+  assert.equal(
+    s.takeOrphan('/z/1.jsonl', 'outreach-campaigns', 'telegram'),
+    undefined,
+  );
+});
+
+test('clearOrphan removes unconditionally', async () => {
+  const p = await mkTmpStatePath('clearOrphan');
+  const s = await RelayState.load(p);
+
+  const id = 'rl_eeeeee';
+  s.addRegistry(makeRegistryEntry(id));
+  s.setSource('/q/1.jsonl', makeSourceState({ relayId: id }));
+  s.removeRegistry(id);
+  assert.ok(s.getOrphan('/q/1.jsonl'));
+
+  assert.equal(s.clearOrphan('/q/1.jsonl'), true);
+  assert.equal(s.getOrphan('/q/1.jsonl'), undefined);
+  assert.equal(s.clearOrphan('/q/1.jsonl'), false);
 });
 
 test('removeRegistry returns undefined when id is unknown', async () => {

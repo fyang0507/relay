@@ -12,6 +12,7 @@ import path from 'node:path';
 import { SocketServer } from '../src/socket.ts';
 import { RelayState, type RegistryEntry } from '../src/state.ts';
 import type { Relay, ListedSource } from '../src/runtime.ts';
+import { SourceNameConflictError } from '../src/runtime.ts';
 import type { SourceConfig } from '../src/types.ts';
 
 // Minimal fake that satisfies SocketServer's Relay touchpoints.
@@ -24,14 +25,24 @@ class FakeRelay {
   }
 
   async addSource(sourceConfig: SourceConfig, configPath: string): Promise<string> {
-    const existing = this.state
-      .listRegistry()
-      .find(
-        (e) =>
-          e.configPath === configPath &&
-          e.sourceConfig.name === sourceConfig.name,
-      );
-    if (existing) return existing.id;
+    let samePairMatch: RegistryEntry | undefined;
+    let nameConflict: RegistryEntry | undefined;
+    for (const e of this.state.listRegistry()) {
+      if (e.sourceConfig.name !== sourceConfig.name) continue;
+      if (e.configPath === configPath) {
+        samePairMatch = e;
+        break;
+      }
+      nameConflict = e;
+    }
+    if (samePairMatch) return samePairMatch.id;
+    if (nameConflict) {
+      throw new SourceNameConflictError({
+        sourceName: sourceConfig.name,
+        existingId: nameConflict.id,
+        existingConfigPath: nameConflict.configPath,
+      });
+    }
     const id = this.state.generateRelayId();
     const entry: RegistryEntry = {
       id,
@@ -363,6 +374,53 @@ test('add on invalid config surfaces loader error with code config_invalid', asy
   assert.equal(resp.ok, false);
   assert.equal(resp.code, 'config_invalid');
   assert.match(resp.error, /sources\[0\]/);
+});
+
+test('add returns name_conflict when another configPath owns the source name (GH #15)', async (t) => {
+  const h = await startHarness('add-name-conflict');
+  t.after(() => h.cleanup());
+
+  // Seed the registry with a source under configPath A.
+  const cfgPathA = await writeConfig(
+    h.tmpDir,
+    'a.yaml',
+    `sources:
+  - name: shared
+    path_glob: ${h.tmpDir}/*.jsonl
+    inbound_types: [human_input]
+    provider:
+      type: stdout
+`,
+  );
+  const first = await rpc<{ ok: boolean; added: Array<{ id: string; name: string }> }>(
+    h.socketPath,
+    { cmd: 'add', configPath: cfgPathA },
+  );
+  assert.equal(first.ok, true);
+
+  // Same source name under a different configPath must be rejected.
+  const cfgPathB = await writeConfig(
+    h.tmpDir,
+    'b.yaml',
+    `sources:
+  - name: shared
+    path_glob: ${h.tmpDir}/*.jsonl
+    inbound_types: [human_input]
+    provider:
+      type: stdout
+`,
+  );
+  const resp = await rpc<{ ok: boolean; error: string; code: string }>(
+    h.socketPath,
+    { cmd: 'add', configPath: cfgPathB },
+  );
+  assert.equal(resp.ok, false);
+  assert.equal(resp.code, 'name_conflict');
+  assert.match(resp.error, /shared/);
+  assert.match(resp.error, /already registered/);
+
+  // Registry is unchanged — only the original entry is present.
+  assert.equal(h.state.listRegistry().length, 1);
 });
 
 test('remove happy path + dryRun + not_found', async (t) => {

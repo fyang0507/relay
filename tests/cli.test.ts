@@ -528,6 +528,35 @@ test('runAdd config_invalid → CliError exit 2', async () => {
   );
 });
 
+test('runAdd name_conflict → CliError with remediation hint (GH #15)', async () => {
+  const client = stubClient({
+    add: async () => {
+      const e = new Error(
+        'source name "shared" is already registered under id rl_old000 at configPath /abs/a.yaml; remove it first or pick a different name',
+      ) as Error & { code?: string };
+      e.code = 'name_conflict';
+      throw e;
+    },
+  });
+  await assert.rejects(
+    async () =>
+      runAdd({
+        configPath: '/abs/b.yaml',
+        client,
+        socketPath: '/tmp/s',
+      }),
+    (err: unknown) => {
+      assert.ok(err instanceof CliError);
+      assert.equal((err as CliError).exitCode, 1);
+      const joined = (err as CliError).lines.join(' | ');
+      assert.match(joined, /already registered/);
+      assert.match(joined, /rl_old000/);
+      assert.match(joined, /relay remove --id/);
+      return true;
+    },
+  );
+});
+
 test('runRemove prints removed block on success', async () => {
   const client = stubClient({
     remove: async () => ({
