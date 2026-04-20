@@ -24,6 +24,7 @@ import { promises as fsp } from 'node:fs';
 import path from 'node:path';
 
 import type { Relay, ListedSource } from './runtime.ts';
+import { SourceNameConflictError } from './runtime.ts';
 import type { RelayState } from './state.ts';
 import { loadConfig } from './config.ts';
 
@@ -374,7 +375,22 @@ export class SocketServer {
     const added: AddEntry[] = [];
     const existing: AddEntry[] = [];
     for (const source of result.config.sources) {
-      const id = await this.relay.addSource(source, configPath);
+      let id: string;
+      try {
+        id = await this.relay.addSource(source, configPath);
+      } catch (err) {
+        if (err instanceof SourceNameConflictError) {
+          // Name collisions are fail-fast at the registration boundary —
+          // earlier sources in this same config will have registered, which
+          // matches the existing `config_invalid` partial-write behavior.
+          return {
+            ok: false,
+            error: err.message,
+            code: 'name_conflict',
+          };
+        }
+        throw err;
+      }
       const pair = { id, name: source.name };
       if (before.has(source.name)) {
         existing.push(pair);

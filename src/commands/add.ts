@@ -94,6 +94,15 @@ export async function runAdd(opts: AddCommandOpts): Promise<void> {
         2,
       );
     }
+    if (maybeCoded.code === 'name_conflict') {
+      throw new CliError(
+        [
+          `Error: ${maybeCoded.message}.`,
+          "  Run 'relay list' to see current ids; 'relay remove --id <id>' to free the name.",
+        ],
+        1,
+      );
+    }
     throw new CliError(
       [`Error: relay add failed — ${(err as Error).message}`],
       1,
