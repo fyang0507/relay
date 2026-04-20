@@ -1,7 +1,7 @@
 # Relay — Agent-to-Human Observability Layer
 
 Issue: #67 (outreach-side integration)
-Status: v1.1.0 shipped. This doc is the living design reference — where the code and the doc disagree, the code wins and the doc gets updated. See the "v1.0.0 delivered" note under *Implementation phases* for what shipped in the initial release; smaller follow-ons (field filtering, nested provider schema, etc.) have landed on top of that.
+Status: v1.2.0 shipped. This doc is the living design reference — where the code and the doc disagree, the code wins and the doc gets updated. See the "v1.0.0 delivered" note under *Implementation phases* for what shipped in the initial release; smaller follow-ons (field filtering, nested provider schema, per-data-repo `relay setup` command, etc.) have landed on top of that.
 
 ## Problem
 

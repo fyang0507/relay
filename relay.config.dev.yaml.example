@@ -1,0 +1,16 @@
+# Dev-local pointer — copy to relay.config.dev.yaml and set data_repo_path.
+# Only consulted when this file sits next to the running relay binary (or the
+# `dist/` it compiles to). Committed copy is this .example; the live one is
+# gitignored.
+#
+# Resolution order at runtime (first hit wins):
+#   1. RELAY_DATA_REPO env var
+#   2. relay.config.dev.yaml next to the binary (this file)
+#   3. walk up from cwd looking for .agents/workspace.yaml
+#
+# Relay's *watch registry* (which JSONL dirs the daemon follows) is NOT in
+# this file — it is runtime state under ~/.relay/, populated via
+# `relay add --config <path>`. This file only tells relay's build/sync
+# tooling and `relay setup` which data repo to scaffold into.
+
+data_repo_path: "~/path/to/your/data-repo"

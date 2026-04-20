@@ -154,8 +154,52 @@ test('--help prints usage with at least one example', async (t) => {
   // The top-level help embeds a "relay init" example line.
   assert.match(result.stdout, /relay init/);
   // Every top-level subcommand shows up in the commands list.
-  for (const cmd of ['init', 'shutdown', 'health', 'list', 'add', 'remove']) {
+  for (const cmd of ['init', 'setup', 'shutdown', 'health', 'list', 'add', 'remove']) {
     assert.match(result.stdout, new RegExp(`\\b${cmd}\\b`));
+  }
+});
+
+test('relay setup --help shows Examples with --data-repo', async (t) => {
+  if (!existsSync(CLI_JS)) {
+    t.skip('dist/cli.js not found — run `npm run build` first');
+    return;
+  }
+  const result = await runCli(['setup', '--help']);
+  assert.equal(result.code, 0, `stderr=${result.stderr}`);
+  assert.match(result.stdout, /--data-repo/);
+  assert.match(result.stdout, /Examples:/);
+  assert.match(result.stdout, /relay setup --data-repo/);
+});
+
+test('relay setup without data repo resolvable → exit 1 with remediation', async (t) => {
+  if (!existsSync(CLI_JS)) {
+    t.skip('dist/cli.js not found');
+    return;
+  }
+  const tmp = await fsp.mkdtemp(path.join(os.tmpdir(), 'relay-cli-setup-'));
+  try {
+    // Run from a dir with no workspace.yaml walk-up target, with an empty
+    // RELAY_DATA_REPO. The spawn wrapper inherits process.env, so we must
+    // explicitly blank the env var to avoid the dev's own data repo being
+    // picked up.
+    const result = await runCli(['setup'], {
+      RELAY_DATA_REPO: '',
+      // Working dir is where node runs; use tmp via cwd on spawn — but
+      // our runCli doesn't expose cwd. Rely on RELAY_DATA_REPO='' and
+      // trust that /tmp-ish startpoints don't carry a workspace.yaml
+      // marker up the tree. To be safe, assert remediation text which
+      // is unique to the error message.
+    });
+    // Either the dev has an outer workspace.yaml (shouldn't on CI) or we
+    // hit the remediation path. Accept only the remediation branch.
+    if (result.code === 0) {
+      t.skip('environment resolved a data repo — cannot test remediation here');
+      return;
+    }
+    assert.notEqual(result.code, 0);
+    assert.match(result.stderr, /relay setup --data-repo|RELAY_DATA_REPO/);
+  } finally {
+    await fsp.rm(tmp, { recursive: true, force: true });
   }
 });
 

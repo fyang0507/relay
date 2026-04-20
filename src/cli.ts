@@ -25,6 +25,7 @@ import { runHealth } from './commands/health.ts';
 import { runList } from './commands/list.ts';
 import { runAdd } from './commands/add.ts';
 import { runRemove } from './commands/remove.ts';
+import { runSetup } from './commands/setup.ts';
 
 // Translate any error into (exit code, stderr lines). CliError carries
 // both; everything else becomes a generic exit-1 with a single line.
@@ -62,6 +63,7 @@ function buildProgram(): Command {
         '',
         'Common usage:',
         '  relay init                            # install + start the daemon',
+        '  relay setup --data-repo ~/my-data     # stamp workspace.yaml + sync skills',
         '  relay add --config ./relay.config.yaml',
         '  relay list                            # see what is registered',
         '  relay health                          # is the daemon alive?',
@@ -69,7 +71,32 @@ function buildProgram(): Command {
         'See `relay <cmd> --help` for per-command flags and examples.',
       ].join('\n'),
     )
-    .version('1.1.0');
+    .version('1.2.0');
+
+  // ---- setup ------------------------------------------------------------
+  program
+    .command('setup')
+    .description(
+      'Scaffold per-data-repo relay state: stamp .agents/workspace.yaml and sync skills.',
+    )
+    .option(
+      '--data-repo <path>',
+      'Path to the data repo. Defaults to RELAY_DATA_REPO / relay.config.dev.yaml / walk-up.',
+    )
+    .addHelpText(
+      'after',
+      [
+        '',
+        'Examples:',
+        '  # bootstrap a fresh data repo',
+        '  relay setup --data-repo ~/my-data',
+        '  # re-run inside a data repo (walks up for .agents/workspace.yaml)',
+        '  cd ~/my-data && relay setup',
+      ].join('\n'),
+    )
+    .action(wrap<{ dataRepo?: string }>(async (opts) => {
+      await runSetup({ dataRepo: opts.dataRepo });
+    }));
 
   // ---- init -------------------------------------------------------------
   program

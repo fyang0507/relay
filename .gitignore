@@ -2,4 +2,5 @@ node_modules
 dist
 .env
 relay.config.yaml
+relay.config.dev.yaml
 .DS_Store
