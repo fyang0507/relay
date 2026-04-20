@@ -1,0 +1,85 @@
+# Canonical relay source template for outreach-cli campaigns.
+#
+# Relay is an observability daemon that mirrors JSONL files to Telegram forum
+# topics and writes human replies back into those same files. Outreach (and
+# any other consumer) does not depend on relay — the filesystem is the only
+# contract. Relay is optional: without it, agents keep writing JSONL as
+# usual; humans just lose the real-time Telegram view and the inbound
+# reply channel.
+#
+# This file lives in relay's repo (not outreach's) because the integration
+# contract belongs to relay. Consumers link here instead of embedding copies.
+#
+# Setup:
+#   1. In the relay checkout: `npm install && npm run build`, set
+#      TELEGRAM_BOT_API_TOKEN in relay's .env, then `relay init`.
+#   2. Copy this file into your data repo (or anywhere) as
+#      `relay.config.yaml`, and replace <DATA_REPO_PATH> and <GROUP_ID>.
+#   3. Register with: `relay add --config /abs/path/to/relay.config.yaml`.
+#      Verify with `relay list`; check the daemon with `relay health`.
+#
+# The data-repo path matches `outreach health | jq -r .data_repo.path`.
+# Relay expands `~` but does not read outreach.config.yaml.
+
+sources:
+  - name: outreach-campaigns
+    path_glob: <DATA_REPO_PATH>/outreach/campaigns/*.jsonl
+
+    # Loop prevention: relay appends human_input on inbound Telegram replies.
+    # The outbound watcher skips any line whose type is in this list, so
+    # replies don't round-trip. Side-effect: agent-authored human_input
+    # entries are also skipped (not mirrored to Telegram). This is
+    # intentional — the downstream `outcome` the agent writes after
+    # ingesting the human_input IS mirrored, and carries the synthesis.
+    inbound_types: [human_input]
+
+    # Optional: allowlist top-level keys to deliver (omit to deliver the full payload).
+    # Signal-bearing fields only. Drops internal IDs (message_id, thread_id,
+    # call_id, session IDs, schedule IDs, log_file), timestamps (Telegram
+    # shows them), `type` (shown in the message prefix), and campaign_id
+    # (scoped by topic). deliver_field_max_chars caps long free-text below.
+    deliver_fields:
+      - contact_id          # universal: who
+      - channel             # universal: which channel
+      - result              # attempt: sent | connected | no_answer | created | removed
+      - summary             # calendar attempt: event title
+      - start               # calendar attempt: event start
+      - end                 # calendar attempt: event end
+      - objective           # campaign_header
+      - question            # human_question
+      - context             # human_question
+      - text                # human_input body (agent- and relay-authored)
+      - outcome             # outcome event: short verdict text
+      - verdict             # outcome event
+      - note                # outcome, amendment
+      - chosen              # decision
+      - reason              # decision, amendment
+      - resolution          # decision
+      - action              # amendment: cancelled | rescheduled
+      - fields              # identity_access: which identity keys were pulled
+      # - resumed_reason      # callback_run: human_input | timeout
+      # - exit_code           # callback_run
+    deliver_field_max_chars: 500   # only valid alongside deliver_fields
+
+    # Tier policy — silent / notify / ignore per event type.
+    # Procedural records stay silent (reviewable but no phone buzz).
+    # Judgment events (outcome, decision, amendment) notify the observer.
+    # campaign_header publishes silently so new topics open with context.
+    tier_key: type   # override if your agents already use a different field name
+    tiers:
+      campaign_header:  silent
+      attempt:          silent
+      watch:            silent
+      callback_run:     silent
+      identity_access:  silent   # agent pulled an identity field via `outreach whoami`;
+                                 # reviewable for audit, but no notification per pull
+      outcome:          notify
+      decision:         notify
+      amendment:        notify
+      human_input:      notify   # applies to agent-authored entries only;
+                                 # relay-authored ones are filtered above
+      human_question:   notify   # agent-initiated ask; observer sees the question in Telegram
+
+    provider:
+      type: telegram
+      group_id: <GROUP_ID>   # -100xxxxxxxxxx (supergroup with forum topics enabled)

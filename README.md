@@ -27,6 +27,12 @@ Start the daemon (installs a macOS launchd agent under label `com.fyang0507.rela
 relay init
 ```
 
+Scaffold each data repo relay will watch (stamps `.agents/workspace.yaml` and syncs skill docs; idempotent alongside `outreach setup` / `sundial setup`):
+
+```
+relay setup --data-repo ~/my-data
+```
+
 In your project, write a `relay.config.yaml` declaring one or more sources (see `skills/relay-integration/SKILL.md` for the schema). Then register it:
 
 ```
@@ -34,6 +40,8 @@ relay add --config /abs/path/to/your/relay.config.yaml
 relay list           # verify it landed
 relay health         # daemon liveness
 ```
+
+`relay setup` is one-time per data repo; `relay add` is per source and can be re-run. See SKILL.md for the per-command bind-point rule (when relay is required vs optional for a consumer).
 
 Stop and uninstall:
 
@@ -49,8 +57,9 @@ JSONL lines often carry scratch fields that are useful to the agent on resume bu
 
 - `relay.md` — architecture, design principles, provider contract, deferred scope.
 - `CLAUDE.md` — contributor map: file-by-file layout, build/test commands, conventions.
-- `skills/relay-integration/SKILL.md` — consumer-side integration guide (type vocabulary, tier policy, config schema, the `human_input` return channel).
+- `skills/relay-integration/SKILL.md` — consumer-side integration guide (type vocabulary, tier policy, config schema, the `human_input` return channel, agent-driven registration pattern).
 - `skills/relay-integration/telegram-setup.md` — one-time bot + forum supergroup setup.
+- `examples/outreach-source.yaml` — canonical source template for wiring an outreach-cli campaigns directory to relay.
 
 ## Requirements
 

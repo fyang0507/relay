@@ -6,7 +6,7 @@ A filesystem-watching daemon that mirrors agent JSONL logs to messaging platform
 
 ## Architecture at a glance
 
-Relay v1.1.0 ships as two binaries: a long-running daemon (`relayd`, supervised by macOS launchd) that holds a dynamic source registry, and a short-lived CLI (`relay`) that talks to it over a unix-domain socket at `~/.relay/sock`. Project configs are credential-free and registered at runtime via RPC — no static config file on the daemon side.
+Relay v1.2.0 ships as two binaries: a long-running daemon (`relayd`, supervised by macOS launchd) that holds a dynamic source registry, and a short-lived CLI (`relay`) that talks to it over a unix-domain socket at `~/.relay/sock`. Project configs are credential-free and registered at runtime via RPC — no static config file on the daemon side. Per-data-repo wiring (stamping `.agents/workspace.yaml`, syncing skills) is handled by a separate `relay setup [--data-repo <path>]` command that parallels `outreach setup` / `sundial setup`.
 
 File-by-file map (TypeScript, ESM, Node 20+):
 
@@ -18,13 +18,15 @@ File-by-file map (TypeScript, ESM, Node 20+):
 - `src/runtime.ts` — orchestrator with a dynamic source registry. Owns `fileDiscovered` (provision destination, decide offset, stamp `relayId`, track), `truncated` (warn only — V1 halts tail, no auto-recover), lifecycle (`start` replays the persisted registry; `stop` drains inbound and flushes state), `addSource`/`removeSource` (idempotent by `(configPath, sourceName)`), and `listSources`.
 - `src/config.ts` — YAML loader, `${ENV}` expansion, snake_case→camelCase mapping, hand-rolled validator with JSON-path errors. No top-level `providers:` block; each source has a nested `provider:` block (`type` plus type-specific fields) dispatched to a per-provider sub-validator. Auto-injects `['human_input']` into empty `inbound_types` and emits a warning (echo-loop safeguard).
 - `src/credentials.ts` — loads `.env` from the relay repo root (anchored on `import.meta.url`, NOT `process.cwd()`, so launchd's cwd-less invocation works). Reads `TELEGRAM_BOT_API_TOKEN`.
+- `src/dataRepo.ts` — `resolveDataRepo({cwd, env})` + `DataRepoUnresolvedError`. Resolution order: `RELAY_DATA_REPO` env → `relay.config.dev.yaml` next to the binary (via `import.meta.url`) → walk up from `cwd` for `.agents/workspace.yaml` → throw. Parallels outreach/sundial's helpers.
+- `src/skillsSync.ts` — `syncSkills(sourceDir, destDir)` — plain `cpSync` wrapper used by both `relay setup` and the build-time `scripts/sync-skills.mjs`. Destination is overwritten (skills are authoritative from the relay repo).
 - `src/render.ts` — default message renderer: `[<tierKey-value>]\n<pretty JSON>`; soft cap 3500 chars → fall back to single-line JSON → hard-truncate with ellipsis. Optional per-source `deliverFields` projects top-level keys (ordered by the filter list, missing keys absent); optional `deliverFieldMaxChars` caps each projected field individually (strings truncated + `...`; non-strings probed via `JSON.stringify` and replaced with the truncated stringified form if over).
 - `src/daemon.ts` — daemon entry (`relayd` bin). Composes state + credentials + providers + watcher + dispatcher + runtime + socket server, handles SIGINT/SIGTERM/uncaught.
 - `src/socket.ts` — `SocketServer`. Unix-socket JSON-line RPC at `~/.relay/sock` (mode 0600). One request per connection. Commands: `list`, `add`, `remove`, `health`.
 - `src/client.ts` — `RelayClient` + `DaemonNotRunningError`. Same-shape methods as the socket commands; translates `ENOENT`/`ECONNREFUSED` into `DaemonNotRunningError` and `{ok: false}` responses into `Error` with a `.code` field.
 - `src/plist.ts` — pure string-in/string-out launchd plist builder (no I/O). Used by `install()`.
-- `src/cli.ts` — commander-based entry (`relay` bin). Routing only; each subcommand lives under `src/commands/`. Subcommands: `init`, `shutdown`, `health`, `list`, `add --config <path> [--dry-run]`, `remove --id <id> [--dry-run]`.
-- `src/commands/init.ts`, `shutdown.ts`, `health.ts`, `list.ts`, `add.ts`, `remove.ts` — one module per CLI subcommand. `init`/`shutdown` call into `lifecycle.ts`; the rest are thin socket clients.
+- `src/cli.ts` — commander-based entry (`relay` bin). Routing only; each subcommand lives under `src/commands/`. Subcommands: `setup [--data-repo <path>]`, `init`, `shutdown`, `health`, `list`, `add --config <path> [--dry-run]`, `remove --id <id> [--dry-run]`.
+- `src/commands/init.ts`, `shutdown.ts`, `health.ts`, `list.ts`, `add.ts`, `remove.ts`, `setup.ts` — one module per CLI subcommand. `init`/`shutdown` call into `lifecycle.ts`; `setup` resolves the data repo, stamps `tools.relay` in `.agents/workspace.yaml` (preserving sibling entries), and runs `syncSkills`; the rest are thin socket clients.
 - `src/commands/lifecycle.ts` — `install` / `uninstall` / `isInstalled`. Shells out to `/bin/launchctl` (`bootstrap` / `bootout` / `print`), writes the plist, polls `health` until the daemon answers. Resolves the node binary via `process.execPath` at install time.
 - `src/commands/output.ts` — `printKv` / `printError` / section helpers (kv format, no colors).
 - `src/commands/errors.ts` — `CliError` (exit code + stderr lines) and the canonical "daemon not running" advice lines.
@@ -33,19 +35,21 @@ File-by-file map (TypeScript, ESM, Node 20+):
 - `src/providers/telegram.ts` — Bot API provider using built-in `fetch` (no SDK). `createForumTopic` on provision, `sendMessage` on deliver, `getUpdates` long-poll (25s) on receive. Honors a single `retry_after` on 429; classifies "topic gone" 400s as permanent (`disableMapping: true`).
 - `src/providers/telegramTypes.ts` — minimal Bot API response types (only the fields relay reads).
 
-Tests: 147 tests under `tests/*.test.ts` (node --test, real tmp files for watcher) covering state, watch, dispatch, runtime, config, credentials, telegram, socket, client, daemon, plist, lifecycle, cli. Integration: `scripts/integration-test.sh` (live Telegram). Consumer contract skill: `skills/relay-integration/SKILL.md`.
+Tests: 196 tests under `tests/*.test.ts` (node --test, real tmp files for watcher) covering state, watch, dispatch, runtime, config, credentials, telegram, socket, client, daemon, plist, lifecycle, cli, dataRepo, setup. Integration: `scripts/integration-test.sh` (live Telegram). Consumer contract skill: `skills/relay-integration/SKILL.md`.
+
+Build-time skills sync: `scripts/sync-skills.mjs` runs after `tsc` in `npm run build`. It calls `resolveDataRepo()` from the freshly-built `dist/dataRepo.js`; if the data repo is unresolvable it warns and exits 0 so fresh clones / CI still build cleanly. `RELAY_SKIP_SKILLS_SYNC=1` short-circuits the script unconditionally (intended for packaging).
 
 ## Build / run / test
 
 ```
 npm install
-npm run build                   # tsc -p tsconfig.build.json && chmod +x dist/cli.js dist/daemon.js
+npm run build                   # tsc + chmod + scripts/sync-skills.mjs
 npm test                        # node --test 'tests/**/*.test.ts'
 npx tsc --noEmit                # type-check only (uses tsconfig.json, includes tests)
 ./scripts/integration-test.sh   # live Telegram E2E
 ```
 
-`npm run build` produces two executables: `dist/cli.js` (the `relay` bin) and `dist/daemon.js` (the `relayd` bin), both chmod +x. The launchd agent invokes `node dist/daemon.js`.
+`npm run build` produces two executables: `dist/cli.js` (the `relay` bin) and `dist/daemon.js` (the `relayd` bin), both chmod +x. The launchd agent invokes `node dist/daemon.js`. The post-build `sync-skills.mjs` step copies `skills/relay-integration/` → `<data_repo>/.agents/skills/relay/` when a data repo is resolvable; it warns-and-exits-0 otherwise so fresh clones still build.
 
 Why two tsconfigs: `tsconfig.json` is `noEmit: true` and includes both `src` and `tests` for type-checking. `tsconfig.build.json` extends it, flips `noEmit: false`, restricts `rootDir` to `src`, and uses `rewriteRelativeImportExtensions` so `.ts` imports emit as `.js`.
 
@@ -66,6 +70,8 @@ Why two tsconfigs: `tsconfig.json` is `noEmit: true` and includes both `src` and
 - Credentials load from the relay repo's `.env` via `src/credentials.ts` — never from project configs. Path resolution anchors on `import.meta.url` so launchd's cwd-less invocation still finds it.
 - Per-command modules under `src/commands/`; `src/cli.ts` is routing-only. Commands throw `CliError` instead of calling `process.exit` so tests can import them directly.
 - `RELAY_SOCKET_PATH` env var propagates through every socket-client command for test isolation.
+- **Two registration flows, don't conflate:** `relay setup [--data-repo <path>]` is per-data-repo (stamps `.agents/workspace.yaml`, syncs skills, idempotent) — parallels `outreach setup` / `sundial setup`. `relay add --config <path>` is per-source (registers a watch source with the running daemon, persisted in `~/.relay/state.json`). The watch registry is multi-tenant and not colocated with any data repo's workspace.yaml.
+- Data-repo resolution (`RELAY_DATA_REPO` → `relay.config.dev.yaml` next to the binary → walk-up for `.agents/workspace.yaml` → error) lives in `src/dataRepo.ts` and is shared by the `setup` command and the build-time skills sync. `relay.config.dev.yaml` is gitignored; ship changes to `relay.config.dev.yaml.example`.
 
 ## Adding things
 
