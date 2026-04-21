@@ -27,6 +27,8 @@ Start the daemon (installs a macOS launchd agent under label `com.fyang0507.rela
 relay init
 ```
 
+The installed plist wraps the daemon in `/usr/bin/caffeinate -i` so idle sleep (or screen-lock idle timeout) can't suspend the daemon and drop webhook deliveries. Explicit sleep (lid close, power menu) still works. The assertion is released automatically when the daemon exits — `relay shutdown` and `launchctl bootout` leave nothing behind.
+
 Scaffold each data repo relay will watch (stamps `.agents/workspace.yaml` and syncs skill docs; idempotent alongside `outreach setup` / `sundial setup`):
 
 ```

@@ -71,7 +71,7 @@ function buildProgram(): Command {
         'See `relay <cmd> --help` for per-command flags and examples.',
       ].join('\n'),
     )
-    .version('1.2.0');
+    .version('1.4.0');
 
   // ---- setup ------------------------------------------------------------
   program

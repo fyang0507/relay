@@ -6,7 +6,7 @@ A filesystem-watching daemon that mirrors agent JSONL logs to messaging platform
 
 ## Architecture at a glance
 
-Relay v1.3.0 ships as two binaries: a long-running daemon (`relayd`, supervised by macOS launchd) that holds a dynamic source registry, and a short-lived CLI (`relay`) that talks to it over a unix-domain socket at `~/.relay/sock`. Project configs are credential-free and registered at runtime via RPC — no static config file on the daemon side. Per-data-repo wiring (stamping `.agents/workspace.yaml`, syncing skills) is handled by a separate `relay setup [--data-repo <path>]` command that parallels `outreach setup` / `sundial setup`.
+Relay v1.4.0 ships as two binaries: a long-running daemon (`relayd`, supervised by macOS launchd) that holds a dynamic source registry, and a short-lived CLI (`relay`) that talks to it over a unix-domain socket at `~/.relay/sock`. Project configs are credential-free and registered at runtime via RPC — no static config file on the daemon side. Per-data-repo wiring (stamping `.agents/workspace.yaml`, syncing skills) is handled by a separate `relay setup [--data-repo <path>]` command that parallels `outreach setup` / `sundial setup`.
 
 File-by-file map (TypeScript, ESM, Node 20+):
 
@@ -24,7 +24,7 @@ File-by-file map (TypeScript, ESM, Node 20+):
 - `src/daemon.ts` — daemon entry (`relayd` bin). Composes state + credentials + providers + watcher + dispatcher + runtime + socket server, handles SIGINT/SIGTERM/uncaught.
 - `src/socket.ts` — `SocketServer`. Unix-socket JSON-line RPC at `~/.relay/sock` (mode 0600). One request per connection. Commands: `list`, `add`, `remove`, `health`.
 - `src/client.ts` — `RelayClient` + `DaemonNotRunningError`. Same-shape methods as the socket commands; translates `ENOENT`/`ECONNREFUSED` into `DaemonNotRunningError` and `{ok: false}` responses into `Error` with a `.code` field.
-- `src/plist.ts` — pure string-in/string-out launchd plist builder (no I/O). Used by `install()`.
+- `src/plist.ts` — pure string-in/string-out launchd plist builder (no I/O). Used by `install()`. Always prepends `/usr/bin/caffeinate -i` to `ProgramArguments` so idle sleep can't suspend the daemon; the assertion is released when caffeinate's child (the daemon) exits, so `launchctl bootout` tears everything down cleanly.
 - `src/cli.ts` — commander-based entry (`relay` bin). Routing only; each subcommand lives under `src/commands/`. Subcommands: `setup [--data-repo <path>]`, `init`, `shutdown`, `health`, `list`, `add --config <path> [--dry-run]`, `remove --id <id> [--dry-run]`.
 - `src/commands/init.ts`, `shutdown.ts`, `health.ts`, `list.ts`, `add.ts`, `remove.ts`, `setup.ts` — one module per CLI subcommand. `init`/`shutdown` call into `lifecycle.ts`; `setup` resolves the data repo, stamps `tools.relay` in `.agents/workspace.yaml` (preserving sibling entries), and runs `syncSkills`; the rest are thin socket clients.
 - `src/commands/lifecycle.ts` — `install` / `uninstall` / `isInstalled`. Shells out to `/bin/launchctl` (`bootstrap` / `bootout` / `print`), writes the plist, polls `health` until the daemon answers. Resolves the node binary via `process.execPath` at install time.

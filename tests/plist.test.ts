@@ -89,7 +89,7 @@ test('buildPlist escapes XML special characters in values', () => {
   }
 });
 
-test('buildPlist ProgramArguments lists daemonPath first then args in order', () => {
+test('buildPlist ProgramArguments wraps daemonPath+args with caffeinate -i', () => {
   const out = buildPlist({
     ...baseSpec,
     daemonPath: '/usr/bin/node',
@@ -104,7 +104,13 @@ test('buildPlist ProgramArguments lists daemonPath first then args in order', ()
   const strings = [...body.matchAll(/<string>([^<]*)<\/string>/g)].map(
     (m) => m[1],
   );
+  // caffeinate -i is always prepended so idle sleep doesn't suspend the
+  // daemon. It must come before the node binary so launchd invokes it
+  // directly (and caffeinate becomes the parent that holds the assertion
+  // for the child's lifetime).
   assert.deepEqual(strings, [
+    '/usr/bin/caffeinate',
+    '-i',
     '/usr/bin/node',
     '/a/daemon.js',
     '--flag',

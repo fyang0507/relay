@@ -48,8 +48,20 @@ function stringTag(value: string): string {
   return `<string>${escapeXml(value)}</string>`;
 }
 
+// Prepended to every ProgramArguments array. `caffeinate -i` holds an idle-
+// sleep assertion for the lifetime of its child and releases it when the
+// child exits, so the daemon stays reachable while the Mac is locked/idle
+// and launchctl bootout still tears everything down cleanly. `-i` (idle
+// sleep only) is deliberate: explicit sleep (lid close, power menu) still
+// works, which is what users expect.
+const CAFFEINATE_WRAPPER = ['/usr/bin/caffeinate', '-i'] as const;
+
 export function buildPlist(spec: PlistSpec): string {
-  const programArguments = [spec.daemonPath, ...spec.args];
+  const programArguments = [
+    ...CAFFEINATE_WRAPPER,
+    spec.daemonPath,
+    ...spec.args,
+  ];
 
   const lines: string[] = [];
   lines.push('<?xml version="1.0" encoding="UTF-8"?>');

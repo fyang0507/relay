@@ -1,7 +1,7 @@
 # Relay — Agent-to-Human Observability Layer
 
 Issue: #67 (outreach-side integration)
-Status: v1.3.0 shipped. This doc is the living design reference — where the code and the doc disagree, the code wins and the doc gets updated. See the "v1.0.0 delivered" note under *Implementation phases* for what shipped in the initial release; smaller follow-ons (field filtering, nested provider schema, per-data-repo `relay setup` command, etc.) have landed on top of that.
+Status: v1.4.0 shipped. This doc is the living design reference — where the code and the doc disagree, the code wins and the doc gets updated. See the "v1.0.0 delivered" note under *Implementation phases* for what shipped in the initial release; smaller follow-ons (field filtering, nested provider schema, per-data-repo `relay setup` command, etc.) have landed on top of that.
 
 ## Problem
 
@@ -210,7 +210,7 @@ Phases 1–3 of the original plan shipped; the CLI/daemon split was reworked to 
 - **Socket RPC** (`src/socket.ts`). One request per connection, newline-delimited JSON. Commands: `list`, `add`, `remove`, `health`.
 - **Dynamic source registry**. Sources arrive via `relay add --config <path>` at runtime; the daemon persists them under `registry` in `~/.relay/state.json` (schema v2) keyed by auto-generated `rl_xxxxxx` ids. On restart the registry is replayed so the live source set survives. Idempotent by `(configPath, sourceName)`.
 - **Credentials split**. Project configs have no `providers:` block; each source declares its destination inline under the nested `provider:` block. The bot token lives in the relay repo's `.env` as `TELEGRAM_BOT_API_TOKEN`, loaded by `src/credentials.ts` (anchored on `import.meta.url` so launchd's cwd-less invocation still finds it).
-- **Launchd integration** (`src/plist.ts`, `src/commands/lifecycle.ts`). `relay init` writes `~/Library/LaunchAgents/com.fyang0507.relay.plist`, `launchctl bootstrap`s it, and polls `health` until the daemon answers. `relay shutdown` is the reverse.
+- **Launchd integration** (`src/plist.ts`, `src/commands/lifecycle.ts`). `relay init` writes `~/Library/LaunchAgents/com.fyang0507.relay.plist`, `launchctl bootstrap`s it, and polls `health` until the daemon answers. `relay shutdown` is the reverse. The plist wraps the daemon in `/usr/bin/caffeinate -i` so macOS idle sleep can't suspend delivery; `-i` (idle only, not `-s`) preserves explicit sleep (lid close, power menu) since that's what users expect.
 - **State schema v2**. New `registry` top-level section; each `sources[filePath]` entry gained a `relayId` linking it back to its registry owner. No auto-migration from v1 — operators clear the file and re-register.
 - **Providers**: stdout (always on) and Telegram (registers when credentials are present). Telegram: `createForumTopic` → `sendMessage` → `getUpdates` long-poll. `sendMessage` honors a single 429 `retry_after`; `createForumTopic` retries 429/5xx with exponential backoff capped at 5 attempts (GH #9); "topic gone" 400s from `sendMessage` flip the mapping to permanently disabled.
 - **147 tests** across state, watch, dispatch, runtime, config, credentials, telegram, socket, client, daemon, plist, lifecycle, cli.
